@@ -52,19 +52,17 @@ fn runOnce(allocator: std.mem.Allocator, config: Config) !void {
 }
 
 fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
-    // 由于 Zig 标准库暂不内置 HTTP 客户端，这里采用一个极简的调用方案：
-    // 使用 OS 命令 `curl`/`powershell Invoke-RestMethod` 获取 IP。
-    // 在 Windows PowerShell 上优先使用 irm 简易命令。
-    // 注意：生产环境建议改为嵌入式 HTTP 客户端或第三方库。
-    if (@import("builtin").os.tag == .windows) {
-        const cmd = try std.fmt.allocPrint(allocator, "(Invoke-RestMethod -UseBasicParsing '{s}')", .{url});
-        defer allocator.free(cmd);
-        return runPowerShell(allocator, cmd);
-    } else {
-        const cmd = "curl";
-        const args = [_][]const u8{ "-s", url };
-        return runReadCmd(allocator, cmd, &args);
-    }
+    // 使用 Zig 0.15.1+ 内置 HTTP 客户端获取公网 IP
+    var client = std.http.Client{ .allocator = allocator };
+    defer client.deinit();
+    const uri = try std.Uri.parse(url);
+    var req = try client.request(.GET, uri, .{});
+    defer req.deinit();
+    try req.sendBodiless();
+    var redirect_buffer: [1024]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buffer);
+    const body = try response.reader(&.{}).allocRemaining(allocator, .unlimited);
+    return body;
 }
 
 fn runReadCmd(allocator: std.mem.Allocator, exe: []const u8, args: []const []const u8) ![]u8 {
@@ -183,18 +181,22 @@ const providers = struct {
 };
 
 fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8) ![]u8 {
-    // 同样使用外部命令进行 HTTP 请求：Windows 用 powershell Invoke-WebRequest，其他用 curl。
-    if (@import("builtin").os.tag == .windows) {
-        const cmd = try std.fmt.allocPrint(
-            allocator,
-            "Invoke-WebRequest -UseBasicParsing -Method Post -Uri '{s}' -ContentType 'application/x-www-form-urlencoded' -Body '{s}' | Select-Object -ExpandProperty Content",
-            .{ url, body },
-        );
-        defer allocator.free(cmd);
-        return runPowerShell(allocator, cmd);
-    } else {
-        const curl = "curl";
-        const args = [_][]const u8{ "-s", "-X", "POST", url, "-H", "Content-Type: application/x-www-form-urlencoded", "--data", body };
-        return runReadCmd(allocator, curl, &args);
-    }
+    // 使用 Zig 0.15.1+ 内置 HTTP 客户端 POST 表单
+    var client = std.http.Client{ .allocator = allocator };
+    defer client.deinit();
+    const uri = try std.Uri.parse(url);
+    var req = try client.request(.POST, uri, .{
+        .extra_headers = &.{
+            .{ .name = "content-type", .value = "application/x-www-form-urlencoded" },
+        },
+    });
+    defer req.deinit();
+    req.transfer_encoding = .{ .content_length = body.len };
+    var body_writer = try req.sendBody(&.{});
+    try body_writer.writer.writeAll(body);
+    try body_writer.end();
+    var redirect_buffer: [1024]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buffer);
+    const resp_body = try response.reader(&.{}).allocRemaining(allocator, .unlimited);
+    return resp_body;
 }

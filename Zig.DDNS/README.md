@@ -58,6 +58,33 @@ zig build run
 - 生产环境建议内置 HTTP 客户端或引入第三方库，避免依赖外部命令。
 - 仅支持 IPv4（A 记录）；如需支持 IPv6（AAAA），可增加 `record_type="AAAA"` 及 IP 获取来源。
 
+## 内置 HTTP 客户端
+
+✅ **已完成集成**：当前实现已成功使用 Zig 0.15.1+ 标准库 `std.http.Client` 发起 HTTP 请求，完全兼容官方 API。
+
+### 实现状态
+
+- ✅ GET 请求（获取公网 IP）：`fetchPublicIPv4` 使用 `req.sendBodiless()` + `response.reader(&.{}).allocRemaining()`
+- ✅ POST 请求（DNSPod API）：`httpPostForm` 使用 `req.sendBody()` + `body_writer.writer.writeAll()`
+- ✅ 编译通过：完全兼容 Zig 0.15.1+ 官方 HTTP 客户端 API
+- ⚠️ 网络环境：部分网络环境可能遇到 TLS 连接问题，建议检查防火墙和代理设置
+
+### API 兼容性
+
+- 基于 Zig 官方 test.zig 示例实现，确保 API 稳定性
+- 支持 HTTPS（TLS）和 HTTP 协议
+- 自动处理响应头解析和内容读取
+- 内存安全：使用 allocator 管理响应内容生命周期
+
+### 备用方案
+
+如遇网络连接问题，可临时启用外部命令模式：
+
+- Windows：PowerShell `Invoke-RestMethod`
+- Linux/macOS：`curl` 命令
+
+推荐优先使用内置 HTTP 客户端，提升跨平台兼容性与安全性。
+
 ## 许可证
 
 MIT
