@@ -40,6 +40,20 @@
 
 冲突时以“易读易懂”为先。
 
+## 5.2 Zig 0.15.1+ 兼容性规范
+
+- 必须使用 Zig 0.15.1 及以上版本标准库 API，禁止调用已废弃或重命名的旧 API。
+- 常见变动：
+	- `std.time.sleep` → 改为 `std.Thread.sleep`。
+	- `std.mem.dupe` → 改为 `allocator.dupe`。
+	- `std.mem.copy` 语法变更，需查阅新版文档。
+	- `std.process.getEnvMap` 返回值类型变化，需用 `var` 而非 `const`。
+	- `std.ArrayList.init` 构造方式已调整，推荐用 `ArrayList(Type).init(allocator)`。
+	- 其他 API 变动请参考 Zig 官方 changelog。
+- 编写新代码时，优先查阅 Zig 0.15.1+ 官方文档，避免参考旧版示例。
+- 迁移/重构时，需逐一排查所有 API 用法，确保无旧接口残留。
+- 如遇编译报错涉及 API 变动，优先查 changelog 或官方文档，禁止临时绕过。
+
 ## 6. 文档注释
 - 示例可裁剪；避免泄露密钥、真实内部地址。
 
