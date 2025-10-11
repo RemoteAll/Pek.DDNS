@@ -1,7 +1,19 @@
+// Windows 控制台全局 UTF-8 支持
+// 仅在 Windows 下生效，其他平台无影响
+extern "kernel32" fn SetConsoleOutputCP(codePage: u32) callconv(.Stdcall) i32;
+extern "kernel32" fn SetConsoleCP(codePage: u32) callconv(.Stdcall) i32;
 const std = @import("std");
 const Zig_DDNS = @import("Zig_DDNS");
-
 pub fn main() !void {
+    // Windows 控制台中文/颜色显示：启用虚拟终端处理（ANSI 序列）
+    if (@import("builtin").os.tag == .windows) {
+        const w = std.os.windows;
+        const h = w.kernel32.GetStdHandle(w.STD_OUTPUT_HANDLE);
+        if (h != null and h != w.INVALID_HANDLE_VALUE) {
+            var m: w.DWORD = 0;
+            if (w.kernel32.GetConsoleMode(h.?, &m) != 0) _ = w.kernel32.SetConsoleMode(h.?, m | 0x0004);
+        }
+    }
     // 优先使用配置文件 config.json；若不存在则生成模板并提示填充，再退出。
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -33,7 +45,7 @@ pub fn main() !void {
         var f = try cwd.createFile(config_path, .{ .read = true, .truncate = true });
         defer f.close();
         try f.writeAll(tpl);
-        std.debug.print("\x1b[1;33m[警告]\x1b[0m 已生成配置文件 {s}，请填入实际值后再运行。\n", .{config_path});
+        try print_cn("\x1b[1;33m[警告]\x1b[0m 已生成配置文件 {s}，请填入实际值后再运行。\n", .{config_path});
         return;
     }
 
@@ -44,14 +56,14 @@ pub fn main() !void {
     defer allocator.free(data);
 
     const json = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch |e| {
-        std.debug.print("\x1b[1;31m[配置错误]\x1b[0m 解析 config.json 失败: {s}\n", .{@errorName(e)});
+        _ = print_cn("\x1b[1;31m[配置错误]\x1b[0m 解析 config.json 失败: {s}\n", .{@errorName(e)}) catch {};
         return;
     };
     defer json.deinit();
     const root = json.value;
 
     if (root != .object) {
-        std.debug.print("\x1b[1;31m[配置错误]\x1b[0m config.json 根节点必须为对象\n", .{});
+        _ = print_cn("\x1b[1;31m[配置错误]\x1b[0m config.json 根节点必须为对象\n", .{}) catch {};
         return;
     }
     const obj = root.object;
@@ -59,24 +71,24 @@ pub fn main() !void {
     const provider_str = blk: {
         const v = obj.get("provider") orelse break :blk "dnspod";
         if (v != .string) {
-            std.debug.print("\x1b[1;31m[配置错误]\x1b[0m provider 字段类型应为字符串\n", .{});
+            _ = print_cn("\x1b[1;31m[配置错误]\x1b[0m provider 字段类型应为字符串\n", .{}) catch {};
             return;
         }
         break :blk v.string;
     };
     const provider = blk: {
         if (std.ascii.eqlIgnoreCase(provider_str, "dnspod")) break :blk Zig_DDNS.Provider.dnspod;
-        std.debug.print("\x1b[1;31m[配置错误]\x1b[0m 不支持的 provider: {s}\n", .{provider_str});
+        _ = print_cn("\x1b[1;31m[配置错误]\x1b[0m 不支持的 provider: {s}\n", .{provider_str}) catch {};
         return;
     };
 
     const domain = blk: {
         const v = obj.get("domain") orelse {
-            std.debug.print("\x1b[1;31m[配置错误]\x1b[0m 缺少 domain 字段\n", .{});
+            _ = print_cn("\x1b[1;31m[配置错误]\x1b[0m 缺少 domain 字段\n", .{}) catch {};
             return;
         };
         if (v != .string) {
-            std.debug.print("\x1b[1;31m[配置错误]\x1b[0m domain 字段类型应为字符串\n", .{});
+            _ = print_cn("\x1b[1;31m[配置错误]\x1b[0m domain 字段类型应为字符串\n", .{}) catch {};
             return;
         }
         break :blk v.string;
@@ -86,7 +98,7 @@ pub fn main() !void {
         if (maybe == null) break :blk "@";
         const v = maybe.?;
         if (v != .string) {
-            std.debug.print("\x1b[1;31m[配置错误]\x1b[0m sub_domain 字段类型应为字符串\n", .{});
+            _ = print_cn("\x1b[1;31m[配置错误]\x1b[0m sub_domain 字段类型应为字符串\n", .{}) catch {};
             return;
         }
         break :blk v.string;
@@ -96,7 +108,7 @@ pub fn main() !void {
         if (maybe == null) break :blk "A";
         const v = maybe.?;
         if (v != .string) {
-            std.debug.print("\x1b[1;31m[配置错误]\x1b[0m record_type 字段类型应为字符串\n", .{});
+            _ = print_cn("\x1b[1;31m[配置错误]\x1b[0m record_type 字段类型应为字符串\n", .{}) catch {};
             return;
         }
         break :blk v.string;
@@ -106,7 +118,7 @@ pub fn main() !void {
         if (maybe == null) break :blk 0;
         const v = maybe.?;
         if (v != .integer) {
-            std.debug.print("\x1b[1;31m[配置错误]\x1b[0m interval_sec 字段类型应为整数\n", .{});
+            _ = print_cn("\x1b[1;31m[配置错误]\x1b[0m interval_sec 字段类型应为整数\n", .{}) catch {};
             return;
         }
         break :blk v.integer;
@@ -117,38 +129,38 @@ pub fn main() !void {
         if (maybe == null) break :blk "https://t.sc8.fun/api/client-ip";
         const v = maybe.?;
         if (v != .string) {
-            std.debug.print("\x1b[1;31m[配置错误]\x1b[0m ip_source_url 字段类型应为字符串\n", .{});
+            _ = print_cn("\x1b[1;31m[配置错误]\x1b[0m ip_source_url 字段类型应为字符串\n", .{}) catch {};
             return;
         }
         break :blk v.string;
     };
     const dnspod_val = obj.get("dnspod") orelse {
-        std.debug.print("\x1b[1;31m[配置错误]\x1b[0m 缺少 dnspod 字段\n", .{});
+        _ = print_cn("\x1b[1;31m[配置错误]\x1b[0m 缺少 dnspod 字段\n", .{}) catch {};
         return;
     };
     if (dnspod_val != .object) {
-        std.debug.print("\x1b[1;31m[配置错误]\x1b[0m dnspod 字段类型应为对象\n", .{});
+        _ = print_cn("\x1b[1;31m[配置错误]\x1b[0m dnspod 字段类型应为对象\n", .{}) catch {};
         return;
     }
     const dnspod_obj = dnspod_val.object;
     const token_id = blk: {
         const v = dnspod_obj.get("token_id") orelse {
-            std.debug.print("\x1b[1;31m[配置错误]\x1b[0m 缺少 dnspod.token_id 字段\n", .{});
+            _ = print_cn("\x1b[1;31m[配置错误]\x1b[0m 缺少 dnspod.token_id 字段\n", .{}) catch {};
             return;
         };
         if (v != .string) {
-            std.debug.print("\x1b[1;31m[配置错误]\x1b[0m dnspod.token_id 字段类型应为字符串\n", .{});
+            _ = print_cn("\x1b[1;31m[配置错误]\x1b[0m dnspod.token_id 字段类型应为字符串\n", .{}) catch {};
             return;
         }
         break :blk v.string;
     };
     const token = blk: {
         const v = dnspod_obj.get("token") orelse {
-            std.debug.print("\x1b[1;31m[配置错误]\x1b[0m 缺少 dnspod.token 字段\n", .{});
+            _ = print_cn("\x1b[1;31m[配置错误]\x1b[0m 缺少 dnspod.token 字段\n", .{}) catch {};
             return;
         };
         if (v != .string) {
-            std.debug.print("\x1b[1;31m[配置错误]\x1b[0m dnspod.token 字段类型应为字符串\n", .{});
+            _ = print_cn("\x1b[1;31m[配置错误]\x1b[0m dnspod.token 字段类型应为字符串\n", .{}) catch {};
             return;
         }
         break :blk v.string;
@@ -158,7 +170,7 @@ pub fn main() !void {
         if (maybe == null) break :blk "默认";
         const v = maybe.?;
         if (v != .string) {
-            std.debug.print("\x1b[1;31m[配置错误]\x1b[0m dnspod.line 字段类型应为字符串\n", .{});
+            _ = print_cn("\x1b[1;31m[配置错误]\x1b[0m dnspod.line 字段类型应为字符串\n", .{}) catch {};
             return;
         }
         break :blk v.string;
@@ -194,4 +206,30 @@ test "fuzz example" {
         }
     };
     try std.testing.fuzz(Context{}, Context.testOne, .{});
+}
+
+// 跨平台中文打印：Windows 下使用 WriteConsoleW，其他平台回退到 std.debug.print
+fn print_cn(comptime fmt: []const u8, args: anytype) !void {
+    if (@import("builtin").os.tag != .windows) {
+        std.debug.print(fmt, args);
+        return;
+    }
+    // 格式化为 UTF-8 文本
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    const utf8 = try std.fmt.allocPrint(alloc, fmt, args);
+
+    // 转为 UTF-16LE 并调用 WriteConsoleW
+    const w = std.os.windows;
+    const h = w.kernel32.GetStdHandle(w.STD_OUTPUT_HANDLE);
+    if (h == null or h == w.INVALID_HANDLE_VALUE) {
+        // 退回普通打印
+        std.debug.print("{s}", .{utf8});
+        return;
+    }
+    const utf16 = try std.unicode.utf8ToUtf16LeAlloc(alloc, utf8);
+    // WriteConsoleW 需要 UTF-16 code units 数量
+    var written: w.DWORD = 0;
+    _ = w.kernel32.WriteConsoleW(h.?, utf16.ptr, @as(w.DWORD, @intCast(utf16.len)), &written, null);
 }
