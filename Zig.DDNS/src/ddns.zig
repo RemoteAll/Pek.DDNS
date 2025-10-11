@@ -16,7 +16,7 @@ pub const Config = struct {
     // Provider 专属配置（以 union 方式未来承载更多平台专属字段）
     dnspod: ?DnsPodConfig = null,
     // 网络设置
-    ip_source_url: []const u8 = "https://api.ipify.org", // 查询公网 IPv4 地址
+    ip_source_url: []const u8 = "https://t.sc8.fun/api/client-ip", // 查询公网 IPv4 地址（JSON 数组返回）
 };
 
 pub const DnsPodConfig = struct {
@@ -62,7 +62,42 @@ fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     var redirect_buffer: [1024]u8 = undefined;
     var response = try req.receiveHead(&redirect_buffer);
     const body = try response.reader(&.{}).allocRemaining(allocator, .unlimited);
-    return body;
+
+    // 期望返回格式：
+    // [
+    //   {
+    //     "Ip": "113.87.xxx.xxx",
+    //     "Type": "IPv4",
+    //     "SourceHeader": "X-Real-IP",
+    //     "FromForwardedHeader": true
+    //   }
+    // ]
+    // 这里进行轻量 JSON 解析，提取 Type 为 IPv4 的 Ip 字段。
+    const ip_field = try parseClientIpJson(allocator, body);
+    allocator.free(body);
+    return ip_field;
+}
+
+fn parseClientIpJson(allocator: std.mem.Allocator, json: []const u8) ![]u8 {
+    // 简易解析：查找 IPv4 条目并提取 Ip 值。为避免引入完整 JSON 解析，采用字符串搜索。
+    const type_key = "\"Type\":\"IPv4\"";
+    const ip_key = "\"Ip\":\"";
+
+    const type_pos = std.mem.indexOf(u8, json, type_key) orelse {
+        // 若找不到 IPv4 类型，尝试直接提取第一个 Ip 字段
+        const ip_pos_fallback = std.mem.indexOf(u8, json, ip_key) orelse return error.InvalidFormat;
+        const ip_slice_fallback = json[ip_pos_fallback + ip_key.len ..];
+        const ip_end_fallback = std.mem.indexOf(u8, ip_slice_fallback, "\"") orelse return error.InvalidFormat;
+        return allocator.dupe(u8, ip_slice_fallback[0..ip_end_fallback]);
+    };
+
+    // 从 type 位置向前查找最近的 Ip 键
+    const search_window_start: usize = 0;
+    const window = json[search_window_start..type_pos];
+    const ip_pos_rel = std.mem.lastIndexOf(u8, window, ip_key) orelse return error.InvalidFormat;
+    const ip_slice = window[ip_pos_rel + ip_key.len ..];
+    const ip_end = std.mem.indexOf(u8, ip_slice, "\"") orelse return error.InvalidFormat;
+    return allocator.dupe(u8, ip_slice[0..ip_end]);
 }
 
 fn runReadCmd(allocator: std.mem.Allocator, exe: []const u8, args: []const []const u8) ![]u8 {
