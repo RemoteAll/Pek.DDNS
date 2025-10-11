@@ -284,17 +284,68 @@ fn gunzipAlloc(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
     // 数据段到倒数8字节为止
     if (compressed.len < pos + 8) return error.GzipDataTooShort;
     const deflate_data = compressed[pos .. compressed.len - 8];
-    // 尝试用 std.compress.inflate 解压
-    var in_stream = std.io.fixedBufferStream(deflate_data);
+    // --- 极简 deflate 解码，仅支持固定 Huffman 表 ---
     var out = std.ArrayList(u8).empty;
     defer out.deinit();
-    var inflater = std.compress.inflate.Stream.init(&in_stream, .{});
-    var buf: [4096]u8 = undefined;
-    while (true) {
-        const n = try inflater.read(&buf);
-        if (n == 0) break;
-        try out.appendSlice(buf[0..n]);
+    var bitpos: usize = 0;
+    var finished = false;
+    while (!finished) {
+        if (bitpos / 8 >= deflate_data.len) return error.DeflateUnexpectedEof;
+        // 读取块头
+        const bfinal = (deflate_data[bitpos / 8] >> (bitpos % 8)) & 1;
+        const btype = (deflate_data[bitpos / 8] >> ((bitpos % 8) + 1)) & 0x3;
+        bitpos += 3;
+        if (btype == 0) return error.DeflateNoUncompressedBlock;
+        if (btype == 2) return error.DeflateDynamicNotSupported;
+        if (btype != 1) return error.DeflateUnknownBlockType;
+        // 固定 Huffman 表
+        // 参考 RFC1951 3.2.6
+        // 这里只实现最常见的 LZ77+固定表解码，未实现所有边界
+        while (true) {
+            // 读取一个符号
+            var code: u16 = 0;
+            var codelen: u8 = 0;
+            while (true) {
+                if (bitpos / 8 >= deflate_data.len) return error.DeflateUnexpectedEof;
+                code |= (((deflate_data[bitpos / 8] >> (bitpos % 8)) & 1) << codelen);
+                bitpos += 1;
+                codelen += 1;
+                // 固定表 literal/length 7-9bit
+                if (codelen >= 7 and codelen <= 9) {
+                    // 参照 RFC1951 固定表编码区间
+                    if (codelen == 7 and code >= 0b0000000 and code <= 0b0010111) break;
+                    if (codelen == 8 and code >= 0b00110000 and code <= 0b10111111) break;
+                    if (codelen == 8 and code >= 0b11000000 and code <= 0b11000111) break;
+                    if (codelen == 9 and code >= 0b000110000 and code <= 0b000111111) break;
+                }
+            }
+            // literal/length 解码
+            var sym: u16 = 0;
+            if (codelen == 7) {
+                sym = code;
+            } else if (codelen == 8) {
+                sym = code + 0x30;
+            } else if (codelen == 9) {
+                sym = code + 0x190;
+            } else {
+                return error.DeflateBadCode;
+            }
+            if (sym < 256) {
+                try out.append(@intCast(u8, sym));
+            } else if (sym == 256) {
+                // end of block
+                break;
+            } else {
+                // 只实现最常见的 257-264 长度（3-10字节），不支持更长和额外位
+                if (sym < 257 or sym > 264) return error.DeflateLengthNotSupported;
+                const length = sym - 254;
+                if (out.items.len < length) return error.DeflateLengthOutOfRange;
+                for (length) |i| {
+                    try out.append(out.items[out.items.len - length]);
+                }
+            }
+        }
+        if (bfinal == 1) finished = true;
     }
-    // 校验 CRC32/ISIZE（可选，先不强制）
     return out.toOwnedSlice();
 }
