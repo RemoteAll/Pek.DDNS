@@ -62,20 +62,24 @@ fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     var redirect_buffer: [1024]u8 = undefined;
     var response = try req.receiveHead(&redirect_buffer);
     const body = try response.reader(&.{}).allocRemaining(allocator, .unlimited);
-
-    // 期望返回格式：
-    // [
-    //   {
-    //     "Ip": "113.87.xxx.xxx",
-    //     "Type": "IPv4",
-    //     "SourceHeader": "X-Real-IP",
-    //     "FromForwardedHeader": true
-    //   }
-    // ]
-    // 这里进行轻量 JSON 解析，提取 Type 为 IPv4 的 Ip 字段。
-    const ip_field = try parseClientIpJson(allocator, body);
-    allocator.free(body);
-    return ip_field;
+    defer allocator.free(body);
+    // 打印是否检测到压缩（通过 gzip 魔数）
+    const is_gzip = isGzipMagic(body);
+    std.debug.print("[ip-source encoding] gzip_magic={any}\n", .{is_gzip});
+    if (is_gzip) {
+        const unzipped = try gunzipAlloc(allocator, body);
+        std.debug.print("[ip-source gunzip] {s}\n", .{unzipped});
+        defer allocator.free(unzipped);
+        // 这里进行轻量 JSON 解析，提取 Type 为 IPv4 的 Ip 字段。
+        const ip_field = try parseClientIpJson(allocator, unzipped);
+        return ip_field;
+    } else {
+        // 打印接口返回的原始数据，便于观察/调试
+        std.debug.print("[ip-source raw] {s}\n", .{body});
+        // 这里进行轻量 JSON 解析，提取 Type 为 IPv4 的 Ip 字段。
+        const ip_field = try parseClientIpJson(allocator, body);
+        return ip_field;
+    }
 }
 
 fn parseClientIpJson(allocator: std.mem.Allocator, json: []const u8) ![]u8 {
@@ -232,6 +236,65 @@ fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
     try body_writer.end();
     var redirect_buffer: [1024]u8 = undefined;
     var response = try req.receiveHead(&redirect_buffer);
-    const resp_body = try response.reader(&.{}).allocRemaining(allocator, .unlimited);
-    return resp_body;
+    const resp_buf = try response.reader(&.{}).allocRemaining(allocator, .unlimited);
+    defer allocator.free(resp_buf);
+    std.debug.print("[post encoding] gzip_magic={any}\n", .{isGzipMagic(resp_buf)});
+    if (isGzipMagic(resp_buf)) {
+        const unzipped = try gunzipAlloc(allocator, resp_buf);
+        // 返回前复制一份，保证释放本地缓冲不会影响调用方
+        const out = try allocator.dupe(u8, unzipped);
+        allocator.free(unzipped);
+        return out;
+    }
+    // 返回前复制一份，保证释放本地缓冲不会影响调用方
+    const out = try allocator.dupe(u8, resp_buf);
+    return out;
+}
+
+// 检测 gzip 魔数 (0x1F, 0x8B)
+fn isGzipMagic(buf: []const u8) bool {
+    return buf.len >= 2 and buf[0] == 0x1F and buf[1] == 0x8B;
+}
+
+// 仅支持常见无特殊标志的 gzip 格式，解压 deflate 数据段
+fn gunzipAlloc(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
+    // 参考 RFC1952 gzip 格式
+    if (compressed.len < 18) return error.GzipHeaderTooShort;
+    if (!(compressed[0] == 0x1F and compressed[1] == 0x8B and compressed[2] == 8)) return error.GzipHeaderInvalid;
+    const flg = compressed[3];
+    var pos: usize = 10;
+    if ((flg & 0x04) != 0) { // FEXTRA
+        if (pos + 2 > compressed.len) return error.GzipHeaderTooShort;
+        const xlen = @as(u16, compressed[pos]) | (@as(u16, compressed[pos + 1]) << 8);
+        pos += 2 + xlen;
+        if (pos > compressed.len) return error.GzipHeaderTooShort;
+    }
+    if ((flg & 0x08) != 0) { // FNAME
+        while (pos < compressed.len and compressed[pos] != 0) : (pos += 1) {}
+        pos += 1;
+    }
+    if ((flg & 0x10) != 0) { // FCOMMENT
+        while (pos < compressed.len and compressed[pos] != 0) : (pos += 1) {}
+        pos += 1;
+    }
+    if ((flg & 0x02) != 0) { // FHCRC
+        pos += 2;
+    }
+    if (pos >= compressed.len) return error.GzipHeaderTooShort;
+    // 数据段到倒数8字节为止
+    if (compressed.len < pos + 8) return error.GzipDataTooShort;
+    const deflate_data = compressed[pos .. compressed.len - 8];
+    // 尝试用 std.compress.inflate 解压
+    var in_stream = std.io.fixedBufferStream(deflate_data);
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit();
+    var inflater = std.compress.inflate.Stream.init(&in_stream, .{});
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = try inflater.read(&buf);
+        if (n == 0) break;
+        try out.appendSlice(buf[0..n]);
+    }
+    // 校验 CRC32/ISIZE（可选，先不强制）
+    return out.toOwnedSlice();
 }
