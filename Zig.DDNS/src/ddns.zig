@@ -13,7 +13,7 @@ pub const Config = struct {
     sub_domain: []const u8, // 子域名/主机记录，如 @、www、home
     record_type: []const u8 = "A", // 默认为 A 记录
     // 轮询/执行模式
-    interval_sec: u32 = 300, // 轮询更新周期，0 表示只执行一次
+    interval_sec: u32 = 60, // 轮询更新周期，0 表示只执行一次
     // Provider 专属配置（以 union 方式未来承载更多平台专属字段）
     dnspod: ?DnsPodConfig = null,
     // 网络设置

@@ -43,7 +43,7 @@ pub fn main() !void {
             "  \"domain\": \"example.com\",\n" ++
             "  \"sub_domain\": \"www\",\n" ++
             "  \"record_type\": \"A\",\n" ++
-            "  \"interval_sec\": 300,\n" ++
+            "  \"interval_sec\": 60,\n" ++
             "  \"dnspod\": {\n" ++
             "    \"token_id\": \"你的TokenId\",\n" ++
             "    \"token\": \"你的Token值\",\n" ++
