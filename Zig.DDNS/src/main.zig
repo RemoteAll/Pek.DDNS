@@ -206,6 +206,18 @@ pub fn main() !void {
                 std.debug.print("[错误] 缺少 Provider 配置，请检查 config.json\n", .{});
                 std.process.exit(1);
             },
+            error.HttpConnectionClosing => {
+                std.debug.print("\n[致命错误] HTTP 连接被服务器关闭\n", .{});
+                std.debug.print("[可能原因]\n", .{});
+                std.debug.print("  1. DNSPod API 服务器与 Zig HTTP 客户端存在兼容性问题\n", .{});
+                std.debug.print("  2. TLS 握手或 HTTP 协议协商失败\n", .{});
+                std.debug.print("  3. 网络环境限制（防火墙、代理等）\n", .{});
+                std.debug.print("\n[建议措施]\n", .{});
+                std.debug.print("  • 检查网络连接和防火墙设置\n", .{});
+                std.debug.print("  • 尝试使用其他网络环境\n", .{});
+                std.debug.print("  • 如果问题持续，这可能是 Zig 0.15.2 std.http.Client 的已知兼容性问题\n", .{});
+                std.process.exit(1);
+            },
             else => {
                 // 其他错误继续抛出，显示堆栈跟踪以便调试
                 return err;

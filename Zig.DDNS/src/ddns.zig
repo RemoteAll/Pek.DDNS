@@ -229,12 +229,14 @@ fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
     const uri = try std.Uri.parse(url);
 
     std.debug.print("[httpPostForm] 创建 POST 请求...\n", .{});
-    // 创建请求，添加完整的 HTTP 头
+    // 创建请求，添加完整的 HTTP 头（模拟标准浏览器/工具行为）
     var req = try client.request(.POST, uri, .{
         .extra_headers = &.{
             .{ .name = "content-type", .value = "application/x-www-form-urlencoded" },
             .{ .name = "user-agent", .value = "Zig-DDNS/1.0" },
             .{ .name = "accept", .value = "*/*" },
+            .{ .name = "accept-encoding", .value = "gzip, deflate" },
+            .{ .name = "connection", .value = "keep-alive" },
         },
     });
     defer req.deinit();
