@@ -1,5 +1,6 @@
 const std = @import("std");
 const json_utils = @import("json_utils.zig");
+const logger = @import("logger.zig");
 
 pub const Provider = enum {
     dnspod,
@@ -66,10 +67,10 @@ fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     defer allocator.free(body);
     // 打印是否检测到压缩（通过 gzip 魔数）
     const is_gzip = isGzipMagic(body);
-    std.debug.print("[ip-source encoding] gzip_magic={any}\n", .{is_gzip});
+    logger.debug("ip-source encoding gzip_magic={any}", .{is_gzip});
     if (is_gzip) {
         const unzipped = try gzipDecompress(allocator, body);
-        std.debug.print("[ip-source gunzip] {s}\n", .{unzipped});
+        logger.debug("ip-source gunzip: {s}", .{unzipped});
         defer allocator.free(unzipped);
         // 使用通用 JSON 工具库提取 Type 为 IPv4 的 Ip 字段
         const ip_field = try json_utils.quickGetStringFromArray(allocator, unzipped, .{
@@ -80,7 +81,7 @@ fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
         return ip_field;
     } else {
         // 打印接口返回的原始数据，便于观察/调试
-        std.debug.print("[ip-source raw] {s}\n", .{body});
+        logger.debug("ip-source raw: {s}", .{body});
         // 使用通用 JSON 工具库提取 Type 为 IPv4 的 Ip 字段
         const ip_field = try json_utils.quickGetStringFromArray(allocator, body, .{
             .match_key = "Type",
@@ -129,8 +130,8 @@ const providers = struct {
         if (std.mem.indexOf(u8, dp.token_id, "TokenId") != null or
             std.mem.indexOf(u8, dp.token, "Token") != null)
         {
-            std.debug.print("[错误] 请在 config.json 中配置真实的 DNSPod API Token\n", .{});
-            std.debug.print("[提示] token_id 和 token 当前仍为占位符，请访问 https://console.dnspod.cn/account/token/apikey 获取\n", .{});
+            logger.err("请在 config.json 中配置真实的 DNSPod API Token", .{});
+            logger.warn("token_id 和 token 当前仍为占位符，请访问 https://console.dnspod.cn/account/token/apikey 获取", .{});
             return error.InvalidConfiguration;
         }
 
@@ -142,18 +143,18 @@ const providers = struct {
 
         const record = try dnspod_find_record(allocator, dp, config.domain, config.sub_domain, config.record_type);
         if (record == null) {
-            std.debug.print("[dnspod] no existing record, will create {s}.{s} -> {s}\n", .{ config.sub_domain, config.domain, ip });
+            logger.info("dnspod: 未找到现有记录，将创建 {s}.{s} -> {s}", .{ config.sub_domain, config.domain, ip });
             try dnspod_create_record(allocator, dp, config.domain, config.sub_domain, config.record_type, ip, config);
-            std.debug.print("[dnspod] created record {s}.{s} -> {s}\n", .{ config.sub_domain, config.domain, ip });
+            logger.info("dnspod: 已创建记录 {s}.{s} -> {s}", .{ config.sub_domain, config.domain, ip });
         } else {
             const r = record.?;
             const need_update = !std.mem.eql(u8, r.value, ip);
             if (need_update) {
-                std.debug.print("[dnspod] change detected: record value={s}, public ip={s} → will update\n", .{ r.value, ip });
+                logger.info("dnspod: 检测到变化 - 记录值={s}, 公网IP={s} → 将更新", .{ r.value, ip });
                 try dnspod_modify_record(allocator, dp, r.id, config.domain, config.sub_domain, config.record_type, ip, config);
-                std.debug.print("[dnspod] updated record {s}.{s} -> {s}\n", .{ config.sub_domain, config.domain, ip });
+                logger.info("dnspod: 已更新记录 {s}.{s} -> {s}", .{ config.sub_domain, config.domain, ip });
             } else {
-                std.debug.print("[dnspod] no change for {s}.{s} (ip={s})\n", .{ config.sub_domain, config.domain, ip });
+                logger.info("dnspod: {s}.{s} 无变化 (ip={s})", .{ config.sub_domain, config.domain, ip });
             }
             allocator.free(r.id);
             allocator.free(r.value);
@@ -173,12 +174,12 @@ const providers = struct {
             .{ .key = "record_type", .v1 = rtype, .v2 = "" },
         });
         defer allocator.free(body);
-        std.debug.print("[dnspod] Record.List domain={s} sub_domain={s} type={s}\n", .{ domain, sub, rtype });
+        logger.debug("dnspod Record.List - domain={s} sub_domain={s} type={s}", .{ domain, sub, rtype });
 
         const resp = try httpPostForm(allocator, "https://dnsapi.cn/Record.List", body);
         defer allocator.free(resp);
         // 打印接口原始 JSON（完整）
-        std.debug.print("[dnspod response] {s}\n", .{resp});
+        logger.debug("dnspod response: {s}", .{resp});
         printDnspodStatus(allocator, resp);
         // 更严格的解析：限定在 records 数组第一条记录的对象范围内查找 id/value，避免误命中其他位置
         const recs_key = "\"records\":[";
@@ -229,10 +230,10 @@ const providers = struct {
             .{ .key = "value", .v1 = ip, .v2 = "" },
         });
         defer allocator.free(body);
-        std.debug.print("[dnspod] calling Record.Create domain={s} sub={s} type={s} value={s}\n", .{ domain, sub, rtype, ip });
+        logger.debug("dnspod Record.Create - domain={s} sub={s} type={s} value={s}", .{ domain, sub, rtype, ip });
         const resp = try httpPostForm(allocator, "https://dnsapi.cn/Record.Create", body);
         defer allocator.free(resp);
-        std.debug.print("[dnspod response] {s}\n", .{resp});
+        logger.debug("dnspod response: {s}", .{resp});
         printDnspodStatus(allocator, resp);
         // 可加入状态检查，这里简化为成功只要返回中包含 "code":"1"
         if (std.mem.indexOf(u8, resp, "\"code\":\"1\"") == null) return error.ApiFailed;
@@ -250,10 +251,10 @@ const providers = struct {
             .{ .key = "value", .v1 = ip, .v2 = "" },
         });
         defer allocator.free(body);
-        std.debug.print("[dnspod] calling Record.Modify id={s} domain={s} sub={s} type={s} new_value={s}\n", .{ record_id, domain, sub, rtype, ip });
+        logger.debug("dnspod Record.Modify - id={s} domain={s} sub={s} type={s} new_value={s}", .{ record_id, domain, sub, rtype, ip });
         const resp = try httpPostForm(allocator, "https://dnsapi.cn/Record.Modify", body);
         defer allocator.free(resp);
-        std.debug.print("[dnspod response] {s}\n", .{resp});
+        logger.debug("dnspod response: {s}", .{resp});
         printDnspodStatus(allocator, resp);
         if (std.mem.indexOf(u8, resp, "\"code\":\"1\"") == null) return error.ApiFailed;
     }
@@ -261,14 +262,14 @@ const providers = struct {
 
 fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8) ![]u8 {
     // 使用 Zig 0.15.2+ 低层 HTTP 客户端 POST 表单（稳定路径）
-    std.debug.print("[httpPostForm] 使用低层 request 发送 POST...\n", .{});
+    logger.debug("httpPostForm: 使用低层 request 发送 POST", .{});
     var client = std.http.Client{ .allocator = allocator, .write_buffer_size = 64 * 1024 };
     defer client.deinit();
 
-    std.debug.print("[httpPostForm] 解析 URI: {s}\n", .{url});
+    logger.debug("httpPostForm: 解析 URI - {s}", .{url});
     const uri = try std.Uri.parse(url);
 
-    std.debug.print("[httpPostForm] 创建 POST 请求...\n", .{});
+    logger.debug("httpPostForm: 创建 POST 请求", .{});
     // 创建请求，添加完整的 HTTP 头（模拟标准浏览器/工具行为）
     var req = try client.request(.POST, uri, .{
         .extra_headers = &.{
@@ -281,29 +282,29 @@ fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
     });
     defer req.deinit();
 
-    std.debug.print("[httpPostForm] 设置请求体长度: {d} 字节\n", .{body.len});
+    logger.debug("httpPostForm: 设置请求体长度 {d} 字节", .{body.len});
     // 设置请求体长度
     req.transfer_encoding = .{ .content_length = body.len };
 
-    std.debug.print("[httpPostForm] 发送请求体...\n", .{});
+    logger.debug("httpPostForm: 发送请求体", .{});
     // 发送请求体
     var body_writer = try req.sendBody(&.{});
     try body_writer.writer.writeAll(body);
     try body_writer.end();
 
-    std.debug.print("[httpPostForm] 等待接收响应头...\n", .{});
+    logger.debug("httpPostForm: 等待接收响应头", .{});
     // 接收响应
     var redirect_buffer: [1024]u8 = undefined;
     var response = req.receiveHead(&redirect_buffer) catch |err| {
-        std.debug.print("[httpPostForm ERROR] ❌ 接收响应头失败: {any}\n", .{err});
-        std.debug.print("[httpPostForm ERROR] 这通常意味着服务器在 HTTP 层之前就关闭了连接\n", .{});
-        std.debug.print("[httpPostForm ERROR] 可能原因：\n", .{});
-        std.debug.print("[httpPostForm ERROR]   1) TLS 握手失败（证书问题）\n", .{});
-        std.debug.print("[httpPostForm ERROR]   2) 服务器检测到无效的认证信息直接断开\n", .{});
-        std.debug.print("[httpPostForm ERROR]   3) 请求格式不符合服务器要求\n", .{});
-        std.debug.print("[httpPostForm ERROR]   4) 网络层面的连接问题\n", .{});
+        logger.err("httpPostForm: 接收响应头失败 - {any}", .{err});
+        logger.warn("这通常意味着服务器在 HTTP 层之前就关闭了连接", .{});
+        logger.warn("可能原因:", .{});
+        logger.warn("  1) TLS 握手失败（证书问题）", .{});
+        logger.warn("  2) 服务器检测到无效的认证信息直接断开", .{});
+        logger.warn("  3) 请求格式不符合服务器要求", .{});
+        logger.warn("  4) 网络层面的连接问题", .{});
         if (err == error.HttpConnectionClosing) {
-            std.debug.print("[httpPostForm Fallback] 尝试使用 PowerShell Invoke-WebRequest 执行 POST...\n", .{});
+            logger.info("httpPostForm Fallback: 尝试使用 PowerShell Invoke-WebRequest 执行 POST", .{});
             const escaped_body = try escapeForPSSingleQuoted(allocator, body);
             defer allocator.free(escaped_body);
             const ps_cmd = try std.fmt.allocPrint(
@@ -319,12 +320,12 @@ fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
     };
 
     // 能走到这里说明成功接收到响应头
-    std.debug.print("[httpPostForm] ✓ 响应接收成功\n", .{});
-    std.debug.print("[httpPostForm] 读取响应体...\n", .{});
+    logger.debug("httpPostForm: 响应接收成功", .{});
+    logger.debug("httpPostForm: 读取响应体", .{});
     const resp_buf = try response.reader(&.{}).allocRemaining(allocator, .unlimited);
     defer allocator.free(resp_buf);
 
-    std.debug.print("[post encoding] gzip_magic={any}\n", .{isGzipMagic(resp_buf)});
+    logger.debug("post encoding gzip_magic={any}", .{isGzipMagic(resp_buf)});
     if (isGzipMagic(resp_buf)) {
         const unzipped = try gzipDecompress(allocator, resp_buf);
         // 返回前复制一份，保证释放本地缓冲不会影响调用方
@@ -351,15 +352,15 @@ fn printDnspodStatus(allocator: std.mem.Allocator, resp: []const u8) void {
         const code = c_slice[0..c_end_rel];
         const message_raw = m_slice[0..m_end_rel];
         const decoded = unicodeUnescapeJson(allocator, message_raw) catch {
-            std.debug.print("[dnspod status] code={s} message={s}\n", .{ code, message_raw });
+            logger.debug("dnspod status: code={s} message={s}", .{ code, message_raw });
             return;
         };
         defer allocator.free(decoded);
-        std.debug.print("[dnspod status] code={s} message={s}\n", .{ code, decoded });
+        logger.debug("dnspod status: code={s} message={s}", .{ code, decoded });
         return;
     };
     const max = if (resp.len > 200) 200 else resp.len;
-    std.debug.print("[dnspod status] raw: {s}...\n", .{resp[0..max]});
+    logger.debug("dnspod status raw: {s}...", .{resp[0..max]});
 }
 
 // 将 JSON 字符串中的 \uXXXX 转义解码为 UTF-8。简单实现：只处理 \u 后跟 4 个十六进制。
