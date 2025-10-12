@@ -253,11 +253,18 @@ fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
     // 接收响应
     var redirect_buffer: [1024]u8 = undefined;
     var response = req.receiveHead(&redirect_buffer) catch |err| {
-        std.debug.print("[httpPostForm ERROR] 接收响应头失败: {any}\n", .{err});
+        std.debug.print("[httpPostForm ERROR] ❌ 接收响应头失败: {any}\n", .{err});
+        std.debug.print("[httpPostForm ERROR] 这通常意味着服务器在 HTTP 层之前就关闭了连接\n", .{});
+        std.debug.print("[httpPostForm ERROR] 可能原因：\n", .{});
+        std.debug.print("[httpPostForm ERROR]   1) TLS 握手失败（证书问题）\n", .{});
+        std.debug.print("[httpPostForm ERROR]   2) 服务器检测到无效的认证信息直接断开\n", .{});
+        std.debug.print("[httpPostForm ERROR]   3) 请求格式不符合服务器要求\n", .{});
+        std.debug.print("[httpPostForm ERROR]   4) 网络层面的连接问题\n", .{});
         return err;
     };
 
-    std.debug.print("[httpPostForm] 响应接收成功\n", .{});
+    // 能走到这里说明成功接收到响应头
+    std.debug.print("[httpPostForm] ✓ 响应接收成功\n", .{});
     std.debug.print("[httpPostForm] 读取响应体...\n", .{});
     const resp_buf = try response.reader(&.{}).allocRemaining(allocator, .unlimited);
     defer allocator.free(resp_buf);
