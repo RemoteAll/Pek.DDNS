@@ -285,15 +285,15 @@ fn gunzipAlloc(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
     if (compressed.len < pos + 8) return error.GzipDataTooShort;
     const deflate_data = compressed[pos .. compressed.len - 8];
     // --- 极简 deflate 解码，仅支持固定 Huffman 表 ---
-    var out = std.ArrayList(u8).empty;
-    defer out.deinit();
+    var out = try std.ArrayList(u8).initCapacity(allocator, 0);
+    defer out.deinit(allocator);
     var bitpos: usize = 0;
     var finished = false;
     while (!finished) {
         if (bitpos / 8 >= deflate_data.len) return error.DeflateUnexpectedEof;
         // 读取块头
-        const bfinal = (deflate_data[bitpos / 8] >> (bitpos % 8)) & 1;
-        const btype = (deflate_data[bitpos / 8] >> ((bitpos % 8) + 1)) & 0x3;
+        const bfinal = (deflate_data[bitpos / 8] >> @intCast(bitpos % 8)) & 1;
+        const btype = (deflate_data[bitpos / 8] >> @intCast((bitpos % 8) + 1)) & 0x3;
         bitpos += 3;
         if (btype == 0) return error.DeflateNoUncompressedBlock;
         if (btype == 2) return error.DeflateDynamicNotSupported;
@@ -307,7 +307,7 @@ fn gunzipAlloc(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
             var codelen: u8 = 0;
             while (true) {
                 if (bitpos / 8 >= deflate_data.len) return error.DeflateUnexpectedEof;
-                code |= (((deflate_data[bitpos / 8] >> (bitpos % 8)) & 1) << codelen);
+                code |= (((deflate_data[bitpos / 8] >> @intCast(bitpos % 8)) & 1) << @intCast(codelen));
                 bitpos += 1;
                 codelen += 1;
                 // 固定表 literal/length 7-9bit
@@ -331,7 +331,7 @@ fn gunzipAlloc(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
                 return error.DeflateBadCode;
             }
             if (sym < 256) {
-                try out.append(@intCast(u8, sym));
+                try out.append(allocator, @intCast(sym));
             } else if (sym == 256) {
                 // end of block
                 break;
@@ -340,12 +340,12 @@ fn gunzipAlloc(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
                 if (sym < 257 or sym > 264) return error.DeflateLengthNotSupported;
                 const length = sym - 254;
                 if (out.items.len < length) return error.DeflateLengthOutOfRange;
-                for (length) |i| {
-                    try out.append(out.items[out.items.len - length]);
+                for (0..length) |_| {
+                    try out.append(allocator, out.items[out.items.len - length]);
                 }
             }
         }
         if (bfinal == 1) finished = true;
     }
-    return out.toOwnedSlice();
+    return out.toOwnedSlice(allocator);
 }

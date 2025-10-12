@@ -1,6 +1,6 @@
 # PeiKeSmart Copilot 协作指令
 
-本说明适用于沛柯智能（PeiKeSmart）及其全部开源 / 衍生项目。本指令用于规范在这些项目中使用 Copilot（及类似智能助手）时的行为，主要面向 Zig 0.15.1及以上 技术栈。
+本说明适用于沛柯智能（PeiKeSmart）及其全部开源 / 衍生项目。本指令用于规范在这些项目中使用 Copilot（及类似智能助手）时的行为，主要面向 Zig 0.15.2及以上 技术栈。
 
 ## 1. 目标
 - 提效：减少机械样板劳动，聚焦业务/核心算法。
@@ -40,9 +40,9 @@
 
 冲突时以“易读易懂”为先。
 
-## 5.2 Zig 0.15.1+ 兼容性规范
+## 5.2 Zig 0.15.2+ 兼容性规范
 
-- 必须使用 Zig 0.15.1 及以上版本标准库 API，禁止调用已废弃或重命名的旧 API。
+- 必须使用 Zig 0.15.2 及以上版本标准库 API，禁止调用已废弃或重命名的旧 API。
 - 常见变动：
 	- `std.time.sleep` → 改为 `std.Thread.sleep`。
 	- `std.mem.dupe` → 改为 `allocator.dupe`。
@@ -50,7 +50,7 @@
 	- `std.process.getEnvMap` 返回值类型变化，需用 `var` 而非 `const`。
 	- `std.ArrayList.init` 构造方式已调整，推荐用 `ArrayList(Type).init(allocator)`。
 	- 其他 API 变动请参考 Zig 官方 changelog。
-- 编写新代码时，优先查阅 Zig 0.15.1+ 官方文档，避免参考旧版示例。
+- 编写新代码时，优先查阅 Zig 0.15.2+ 官方文档，避免参考旧版示例。
 - 迁移/重构时，需逐一排查所有 API 用法，确保无旧接口残留。
 - 如遇编译报错涉及 API 变动，优先查 changelog 或官方文档，禁止临时绕过。
 
