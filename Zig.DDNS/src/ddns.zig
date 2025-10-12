@@ -1,4 +1,5 @@
 const std = @import("std");
+const json_utils = @import("json_utils.zig");
 
 pub const Provider = enum {
     dnspod,
@@ -70,37 +71,24 @@ fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
         const unzipped = try gzipDecompress(allocator, body);
         std.debug.print("[ip-source gunzip] {s}\n", .{unzipped});
         defer allocator.free(unzipped);
-        // 这里进行轻量 JSON 解析，提取 Type 为 IPv4 的 Ip 字段。
-        const ip_field = try parseClientIpJson(allocator, unzipped);
+        // 使用通用 JSON 工具库提取 Type 为 IPv4 的 Ip 字段
+        const ip_field = try json_utils.quickGetStringFromArray(allocator, unzipped, .{
+            .match_key = "Type",
+            .match_value = "IPv4",
+            .target_key = "Ip",
+        });
         return ip_field;
     } else {
         // 打印接口返回的原始数据，便于观察/调试
         std.debug.print("[ip-source raw] {s}\n", .{body});
-        // 这里进行轻量 JSON 解析，提取 Type 为 IPv4 的 Ip 字段。
-        const ip_field = try parseClientIpJson(allocator, body);
+        // 使用通用 JSON 工具库提取 Type 为 IPv4 的 Ip 字段
+        const ip_field = try json_utils.quickGetStringFromArray(allocator, body, .{
+            .match_key = "Type",
+            .match_value = "IPv4",
+            .target_key = "Ip",
+        });
         return ip_field;
     }
-}
-fn parseClientIpJson(allocator: std.mem.Allocator, json: []const u8) ![]u8 {
-    // 简易解析：查找 IPv4 条目并提取 Ip 值。为避免引入完整 JSON 解析，采用字符串搜索。
-    const type_key = "\"Type\":\"IPv4\"";
-    const ip_key = "\"Ip\":\"";
-
-    const type_pos = std.mem.indexOf(u8, json, type_key) orelse {
-        // 若找不到 IPv4 类型，尝试直接提取第一个 Ip 字段
-        const ip_pos_fallback = std.mem.indexOf(u8, json, ip_key) orelse return error.InvalidFormat;
-        const ip_slice_fallback = json[ip_pos_fallback + ip_key.len ..];
-        const ip_end_fallback = std.mem.indexOf(u8, ip_slice_fallback, "\"") orelse return error.InvalidFormat;
-        return allocator.dupe(u8, ip_slice_fallback[0..ip_end_fallback]);
-    };
-
-    // 从 type 位置向前查找最近的 Ip 键
-    const search_window_start: usize = 0;
-    const window = json[search_window_start..type_pos];
-    const ip_pos_rel = std.mem.lastIndexOf(u8, window, ip_key) orelse return error.InvalidFormat;
-    const ip_slice = window[ip_pos_rel + ip_key.len ..];
-    const ip_end = std.mem.indexOf(u8, ip_slice, "\"") orelse return error.InvalidFormat;
-    return allocator.dupe(u8, ip_slice[0..ip_end]);
 }
 
 fn runReadCmd(allocator: std.mem.Allocator, exe: []const u8, args: []const []const u8) ![]u8 {
