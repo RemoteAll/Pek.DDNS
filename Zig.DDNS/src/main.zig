@@ -3,10 +3,34 @@
 const std = @import("std");
 const Zig_DDNS = @import("Zig_DDNS");
 const logger = Zig_DDNS.logger;
+const builtin = @import("builtin");
 
 // Windows API 函数声明（Zig 0.15.2+ 会自动使用正确的调用约定）
 extern "kernel32" fn SetConsoleOutputCP(wCodePageID: u32) c_int;
 extern "kernel32" fn SetConsoleCP(wCodePageID: u32) c_int;
+
+/// Windows 下等待用户按键，避免窗口一闪而过
+fn waitForKeyPress() void {
+    if (builtin.os.tag != .windows) return;
+
+    logger.warn("", .{});
+    logger.info("按任意键退出...", .{});
+
+    // 使用 Windows API ReadFile 等待用户输入
+    const w = std.os.windows;
+    const stdin_handle = w.kernel32.GetStdHandle(w.STD_INPUT_HANDLE);
+    if (stdin_handle == null or stdin_handle == w.INVALID_HANDLE_VALUE) return;
+
+    var buf: [1]u8 = undefined;
+    var bytes_read: w.DWORD = 0;
+    _ = w.kernel32.ReadFile(stdin_handle.?, &buf, 1, &bytes_read, null);
+}
+
+/// 配置错误退出：显示错误信息后等待用户按键（仅 Windows）
+fn configError() noreturn {
+    waitForKeyPress();
+    std.process.exit(1);
+}
 
 pub fn main() !void {
     // Windows 控制台中文/颜色显示：设置 UTF-8 编码并启用虚拟终端处理（ANSI 序列）
@@ -57,7 +81,7 @@ pub fn main() !void {
         defer f.close();
         try f.writeAll(tpl);
         logger.warn("已生成配置文件 {s}，请填入实际值后再运行。", .{config_path});
-        return;
+        configError();
     }
 
     // 读取并解析 JSON 配置
@@ -68,14 +92,15 @@ pub fn main() !void {
 
     const json = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch |e| {
         logger.err("解析 config.json 失败: {s}", .{@errorName(e)});
-        return;
+        logger.err("请检查 JSON 语法是否正确", .{});
+        configError();
     };
     defer json.deinit();
     const root = json.value;
 
     if (root != .object) {
         logger.err("config.json 根节点必须为对象", .{});
-        return;
+        configError();
     }
     const obj = root.object;
 
@@ -90,17 +115,17 @@ pub fn main() !void {
     const provider = blk: {
         if (std.ascii.eqlIgnoreCase(provider_str, "dnspod")) break :blk Zig_DDNS.Provider.dnspod;
         logger.err("不支持的 provider: {s}", .{provider_str});
-        return;
+        configError();
     };
 
     const domain = blk: {
         const v = obj.get("domain") orelse {
             logger.err("缺少 domain 字段", .{});
-            return;
+            configError();
         };
         if (v != .string) {
             logger.err("domain 字段类型应为字符串", .{});
-            return;
+            configError();
         }
         break :blk v.string;
     };
