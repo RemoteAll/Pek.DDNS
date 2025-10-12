@@ -41,9 +41,20 @@ pub fn run(config: Config) !void {
     }
 
     while (true) {
+        const start_time = std.time.nanoTimestamp();
+
         try runOnce(allocator, config);
-        // 简单睡眠；在 CLI 模式下足够使用
-        std.Thread.sleep(@as(u64, config.interval_sec) * std.time.ns_per_s);
+
+        // 计算执行耗时并动态调整睡眠时间，确保固定周期
+        const end_time = std.time.nanoTimestamp();
+        const elapsed_ns = end_time - start_time;
+        const interval_ns = @as(i64, config.interval_sec) * std.time.ns_per_s;
+
+        if (elapsed_ns < interval_ns) {
+            const sleep_ns = interval_ns - elapsed_ns;
+            std.Thread.sleep(@as(u64, @intCast(sleep_ns)));
+        }
+        // 如果执行时间超过间隔，立即开始下一轮，避免累积延迟
     }
 }
 
