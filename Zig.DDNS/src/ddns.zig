@@ -67,7 +67,7 @@ fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     const is_gzip = isGzipMagic(body);
     std.debug.print("[ip-source encoding] gzip_magic={any}\n", .{is_gzip});
     if (is_gzip) {
-        const unzipped = try gunzipAlloc(allocator, body);
+        const unzipped = try gzipDecompress(allocator, body);
         std.debug.print("[ip-source gunzip] {s}\n", .{unzipped});
         defer allocator.free(unzipped);
         // 这里进行轻量 JSON 解析，提取 Type 为 IPv4 的 Ip 字段。
@@ -81,7 +81,6 @@ fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
         return ip_field;
     }
 }
-
 fn parseClientIpJson(allocator: std.mem.Allocator, json: []const u8) ![]u8 {
     // 简易解析：查找 IPv4 条目并提取 Ip 值。为避免引入完整 JSON 解析，采用字符串搜索。
     const type_key = "\"Type\":\"IPv4\"";
@@ -240,7 +239,7 @@ fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
     defer allocator.free(resp_buf);
     std.debug.print("[post encoding] gzip_magic={any}\n", .{isGzipMagic(resp_buf)});
     if (isGzipMagic(resp_buf)) {
-        const unzipped = try gunzipAlloc(allocator, resp_buf);
+        const unzipped = try gzipDecompress(allocator, resp_buf);
         // 返回前复制一份，保证释放本地缓冲不会影响调用方
         const out = try allocator.dupe(u8, unzipped);
         allocator.free(unzipped);
@@ -256,96 +255,32 @@ fn isGzipMagic(buf: []const u8) bool {
     return buf.len >= 2 and buf[0] == 0x1F and buf[1] == 0x8B;
 }
 
-// 仅支持常见无特殊标志的 gzip 格式，解压 deflate 数据段
-fn gunzipAlloc(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
-    // 参考 RFC1952 gzip 格式
-    if (compressed.len < 18) return error.GzipHeaderTooShort;
-    if (!(compressed[0] == 0x1F and compressed[1] == 0x8B and compressed[2] == 8)) return error.GzipHeaderInvalid;
-    const flg = compressed[3];
-    var pos: usize = 10;
-    if ((flg & 0x04) != 0) { // FEXTRA
-        if (pos + 2 > compressed.len) return error.GzipHeaderTooShort;
-        const xlen = @as(u16, compressed[pos]) | (@as(u16, compressed[pos + 1]) << 8);
-        pos += 2 + xlen;
-        if (pos > compressed.len) return error.GzipHeaderTooShort;
+/// 使用 Zig 标准库解压 gzip 数据（基于 std.compress.flate）
+/// 参数:
+///   - allocator: 内存分配器
+///   - compressed: gzip 压缩数据
+/// 返回: 解压后的数据（调用方负责释放）
+fn gzipDecompress(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
+    // 使用固定缓冲区创建 Io.Reader
+    var input_reader: std.Io.Reader = .fixed(compressed);
+
+    // 初始化 flate 解压缩器，指定为 gzip 容器格式
+    // 空切片表示使用内部分配的历史窗口
+    var decompressor = std.compress.flate.Decompress.init(&input_reader, .gzip, &.{});
+
+    // 使用 Writer.Allocating 收集解压后的数据
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
+
+    // 流式解压所有数据
+    _ = try decompressor.reader.streamRemaining(&output.writer);
+
+    // 检查解压过程中的错误
+    if (decompressor.err) |err| {
+        output.deinit();
+        return err;
     }
-    if ((flg & 0x08) != 0) { // FNAME
-        while (pos < compressed.len and compressed[pos] != 0) : (pos += 1) {}
-        pos += 1;
-    }
-    if ((flg & 0x10) != 0) { // FCOMMENT
-        while (pos < compressed.len and compressed[pos] != 0) : (pos += 1) {}
-        pos += 1;
-    }
-    if ((flg & 0x02) != 0) { // FHCRC
-        pos += 2;
-    }
-    if (pos >= compressed.len) return error.GzipHeaderTooShort;
-    // 数据段到倒数8字节为止
-    if (compressed.len < pos + 8) return error.GzipDataTooShort;
-    const deflate_data = compressed[pos .. compressed.len - 8];
-    // --- 极简 deflate 解码，仅支持固定 Huffman 表 ---
-    var out = try std.ArrayList(u8).initCapacity(allocator, 0);
-    defer out.deinit(allocator);
-    var bitpos: usize = 0;
-    var finished = false;
-    while (!finished) {
-        if (bitpos / 8 >= deflate_data.len) return error.DeflateUnexpectedEof;
-        // 读取块头
-        const bfinal = (deflate_data[bitpos / 8] >> @intCast(bitpos % 8)) & 1;
-        const btype = (deflate_data[bitpos / 8] >> @intCast((bitpos % 8) + 1)) & 0x3;
-        bitpos += 3;
-        if (btype == 0) return error.DeflateNoUncompressedBlock;
-        if (btype == 2) return error.DeflateDynamicNotSupported;
-        if (btype != 1) return error.DeflateUnknownBlockType;
-        // 固定 Huffman 表
-        // 参考 RFC1951 3.2.6
-        // 这里只实现最常见的 LZ77+固定表解码，未实现所有边界
-        while (true) {
-            // 读取一个符号
-            var code: u16 = 0;
-            var codelen: u8 = 0;
-            while (true) {
-                if (bitpos / 8 >= deflate_data.len) return error.DeflateUnexpectedEof;
-                code |= (((deflate_data[bitpos / 8] >> @intCast(bitpos % 8)) & 1) << @intCast(codelen));
-                bitpos += 1;
-                codelen += 1;
-                // 固定表 literal/length 7-9bit
-                if (codelen >= 7 and codelen <= 9) {
-                    // 参照 RFC1951 固定表编码区间
-                    if (codelen == 7 and code >= 0b0000000 and code <= 0b0010111) break;
-                    if (codelen == 8 and code >= 0b00110000 and code <= 0b10111111) break;
-                    if (codelen == 8 and code >= 0b11000000 and code <= 0b11000111) break;
-                    if (codelen == 9 and code >= 0b000110000 and code <= 0b000111111) break;
-                }
-            }
-            // literal/length 解码
-            var sym: u16 = 0;
-            if (codelen == 7) {
-                sym = code;
-            } else if (codelen == 8) {
-                sym = code + 0x30;
-            } else if (codelen == 9) {
-                sym = code + 0x190;
-            } else {
-                return error.DeflateBadCode;
-            }
-            if (sym < 256) {
-                try out.append(allocator, @intCast(sym));
-            } else if (sym == 256) {
-                // end of block
-                break;
-            } else {
-                // 只实现最常见的 257-264 长度（3-10字节），不支持更长和额外位
-                if (sym < 257 or sym > 264) return error.DeflateLengthNotSupported;
-                const length = sym - 254;
-                if (out.items.len < length) return error.DeflateLengthOutOfRange;
-                for (0..length) |_| {
-                    try out.append(allocator, out.items[out.items.len - length]);
-                }
-            }
-        }
-        if (bfinal == 1) finished = true;
-    }
-    return out.toOwnedSlice(allocator);
+
+    // 转换为拥有的切片并返回
+    return try output.toOwnedSlice();
 }
