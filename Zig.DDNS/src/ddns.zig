@@ -40,7 +40,7 @@ pub fn run(config: Config) !void {
     while (true) {
         try runOnce(allocator, config);
         // 简单睡眠；在 CLI 模式下足够使用
-        std.Thread.sleep(config.interval_sec * std.time.ns_per_s);
+        std.Thread.sleep(@as(u64, config.interval_sec) * std.time.ns_per_s);
     }
 }
 
@@ -162,18 +162,21 @@ const providers = struct {
     fn dnspod_find_record(allocator: std.mem.Allocator, dp: DnsPodConfig, domain: []const u8, sub: []const u8, rtype: []const u8) !?DnsPodRecord {
         // POST https://dnsapi.cn/Record.List
         // params: login_token, format=json, domain, sub_domain, record_type
-        const body = try std.fmt.allocPrint(
-            allocator,
-            "login_token={s},{s}&format=json&domain={s}&sub_domain={s}&record_type={s}",
-            .{ dp.token_id, dp.token, domain, sub, rtype },
-        );
+        const body = try allocFormEncoded(allocator, &.{
+            .{ .key = "login_token", .v1 = dp.token_id, .v2 = dp.token },
+            .{ .key = "format", .v1 = "json", .v2 = "" },
+            .{ .key = "domain", .v1 = domain, .v2 = "" },
+            .{ .key = "sub_domain", .v1 = sub, .v2 = "" },
+            .{ .key = "record_type", .v1 = rtype, .v2 = "" },
+        });
         defer allocator.free(body);
-
-        std.debug.print("[dnspod request] URL: https://dnsapi.cn/Record.List\n", .{});
-        std.debug.print("[dnspod request] Body: {s}\n", .{body});
+        std.debug.print("[dnspod] Record.List domain={s} sub_domain={s} type={s}\n", .{ domain, sub, rtype });
 
         const resp = try httpPostForm(allocator, "https://dnsapi.cn/Record.List", body);
         defer allocator.free(resp);
+        // 打印接口原始 JSON（完整）
+        std.debug.print("[dnspod response] {s}\n", .{resp});
+        printDnspodStatus(allocator, resp);
         // 简易解析：查找 "records":[{...}] 中第一条的 id 与 value
         const id_key = "\"id\":\"";
         const value_key = "\"value\":\"";
@@ -194,27 +197,40 @@ const providers = struct {
     }
 
     fn dnspod_create_record(allocator: std.mem.Allocator, dp: DnsPodConfig, domain: []const u8, sub: []const u8, rtype: []const u8, ip: []const u8, cfg: Config) !void {
-        const body = try std.fmt.allocPrint(
-            allocator,
-            "login_token={s},{s}&format=json&domain={s}&sub_domain={s}&record_type={s}&record_line={s}&value={s}",
-            .{ dp.token_id, dp.token, domain, sub, rtype, cfg.dnspod.?.line, ip },
-        );
+        const body = try allocFormEncoded(allocator, &.{
+            .{ .key = "login_token", .v1 = dp.token_id, .v2 = dp.token },
+            .{ .key = "format", .v1 = "json", .v2 = "" },
+            .{ .key = "domain", .v1 = domain, .v2 = "" },
+            .{ .key = "sub_domain", .v1 = sub, .v2 = "" },
+            .{ .key = "record_type", .v1 = rtype, .v2 = "" },
+            .{ .key = "record_line", .v1 = cfg.dnspod.?.line, .v2 = "" },
+            .{ .key = "value", .v1 = ip, .v2 = "" },
+        });
         defer allocator.free(body);
         const resp = try httpPostForm(allocator, "https://dnsapi.cn/Record.Create", body);
         defer allocator.free(resp);
+        std.debug.print("[dnspod response] {s}\n", .{resp});
+        printDnspodStatus(allocator, resp);
         // 可加入状态检查，这里简化为成功只要返回中包含 "code":"1"
         if (std.mem.indexOf(u8, resp, "\"code\":\"1\"") == null) return error.ApiFailed;
     }
 
     fn dnspod_modify_record(allocator: std.mem.Allocator, dp: DnsPodConfig, record_id: []const u8, domain: []const u8, sub: []const u8, rtype: []const u8, ip: []const u8, cfg: Config) !void {
-        const body = try std.fmt.allocPrint(
-            allocator,
-            "login_token={s},{s}&format=json&domain={s}&record_id={s}&sub_domain={s}&record_type={s}&record_line={s}&value={s}",
-            .{ dp.token_id, dp.token, domain, record_id, sub, rtype, cfg.dnspod.?.line, ip },
-        );
+        const body = try allocFormEncoded(allocator, &.{
+            .{ .key = "login_token", .v1 = dp.token_id, .v2 = dp.token },
+            .{ .key = "format", .v1 = "json", .v2 = "" },
+            .{ .key = "domain", .v1 = domain, .v2 = "" },
+            .{ .key = "record_id", .v1 = record_id, .v2 = "" },
+            .{ .key = "sub_domain", .v1 = sub, .v2 = "" },
+            .{ .key = "record_type", .v1 = rtype, .v2 = "" },
+            .{ .key = "record_line", .v1 = cfg.dnspod.?.line, .v2 = "" },
+            .{ .key = "value", .v1 = ip, .v2 = "" },
+        });
         defer allocator.free(body);
         const resp = try httpPostForm(allocator, "https://dnsapi.cn/Record.Modify", body);
         defer allocator.free(resp);
+        std.debug.print("[dnspod response] {s}\n", .{resp});
+        printDnspodStatus(allocator, resp);
         if (std.mem.indexOf(u8, resp, "\"code\":\"1\"") == null) return error.ApiFailed;
     }
 };
@@ -262,6 +278,19 @@ fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
         std.debug.print("[httpPostForm ERROR]   2) 服务器检测到无效的认证信息直接断开\n", .{});
         std.debug.print("[httpPostForm ERROR]   3) 请求格式不符合服务器要求\n", .{});
         std.debug.print("[httpPostForm ERROR]   4) 网络层面的连接问题\n", .{});
+        if (err == error.HttpConnectionClosing) {
+            std.debug.print("[httpPostForm Fallback] 尝试使用 PowerShell Invoke-WebRequest 执行 POST...\n", .{});
+            const escaped_body = try escapeForPSSingleQuoted(allocator, body);
+            defer allocator.free(escaped_body);
+            const ps_cmd = try std.fmt.allocPrint(
+                allocator,
+                "Invoke-WebRequest -Method POST -Uri '{s}' -Body '{s}' -ContentType 'application/x-www-form-urlencoded' -UserAgent 'Zig-DDNS/1.0' | Select-Object -ExpandProperty Content",
+                .{ url, escaped_body },
+            );
+            defer allocator.free(ps_cmd);
+            const ps_out = try runPowerShell(allocator, ps_cmd);
+            return ps_out;
+        }
         return err;
     };
 
@@ -282,9 +311,143 @@ fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
     // 返回前复制一份，保证释放本地缓冲不会影响调用方
     const out = try allocator.dupe(u8, resp_buf);
     return out;
-} // 检测 gzip 魔数 (0x1F, 0x8B)
+}
+
+// 打印 DNSPod 返回中的 status.code 与 status.message，若无法解析，打印前 200 字节作为诊断
+fn printDnspodStatus(allocator: std.mem.Allocator, resp: []const u8) void {
+    const code_key = "\"code\":\"";
+    const msg_key = "\"message\":\"";
+    const code_start = std.mem.indexOf(u8, resp, code_key);
+    const msg_start = std.mem.indexOf(u8, resp, msg_key);
+    if (code_start) |cs| if (msg_start) |ms| {
+        const c_slice = resp[cs + code_key.len ..];
+        const m_slice = resp[ms + msg_key.len ..];
+        const c_end_rel = std.mem.indexOfScalar(u8, c_slice, '"') orelse 0;
+        const m_end_rel = std.mem.indexOfScalar(u8, m_slice, '"') orelse 0;
+        const code = c_slice[0..c_end_rel];
+        const message_raw = m_slice[0..m_end_rel];
+        const decoded = unicodeUnescapeJson(allocator, message_raw) catch {
+            std.debug.print("[dnspod status] code={s} message={s}\n", .{ code, message_raw });
+            return;
+        };
+        defer allocator.free(decoded);
+        std.debug.print("[dnspod status] code={s} message={s}\n", .{ code, decoded });
+        return;
+    };
+    const max = if (resp.len > 200) 200 else resp.len;
+    std.debug.print("[dnspod status] raw: {s}...\n", .{resp[0..max]});
+}
+
+// 将 JSON 字符串中的 \uXXXX 转义解码为 UTF-8。简单实现：只处理 \u 后跟 4 个十六进制。
+fn unicodeUnescapeJson(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try out.ensureTotalCapacityPrecise(allocator, s.len);
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        if (s[i] == '\\' and i + 5 < s.len and s[i + 1] == 'u') {
+            const h0 = s[i + 2];
+            const h1 = s[i + 3];
+            const h2 = s[i + 4];
+            const h3 = s[i + 5];
+            const val = (hexVal(h0) << 12) | (hexVal(h1) << 8) | (hexVal(h2) << 4) | hexVal(h3);
+            // 只处理基本多文种平面 BMP（不合并代理对），足以覆盖中文提示
+            // 手动 UTF-8 编码（覆盖 0..0xFFFF 范围）
+            const cp: u21 = @as(u21, @intCast(val));
+            if (cp <= 0x7F) {
+                try out.append(allocator, @as(u8, @intCast(cp)));
+            } else if (cp <= 0x7FF) {
+                try out.append(allocator, 0xC0 | @as(u8, @intCast((cp >> 6) & 0x1F)));
+                try out.append(allocator, 0x80 | @as(u8, @intCast(cp & 0x3F)));
+            } else {
+                try out.append(allocator, 0xE0 | @as(u8, @intCast((cp >> 12) & 0x0F)));
+                try out.append(allocator, 0x80 | @as(u8, @intCast((cp >> 6) & 0x3F)));
+                try out.append(allocator, 0x80 | @as(u8, @intCast(cp & 0x3F)));
+            }
+            i += 5; // 跳过 \uXXXX
+        } else {
+            try out.append(allocator, s[i]);
+        }
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+fn hexVal(c: u8) u21 {
+    return switch (c) {
+        '0'...'9' => @as(u21, c - '0'),
+        'a'...'f' => @as(u21, 10 + c - 'a'),
+        'A'...'F' => @as(u21, 10 + c - 'A'),
+        else => 0,
+    };
+}
+
+// isGzipMagic 已在上文定义，这里不重复定义
 fn isGzipMagic(buf: []const u8) bool {
     return buf.len >= 2 and buf[0] == 0x1F and buf[1] == 0x8B;
+}
+
+// 将字符串转换为 PowerShell 单引号字面量安全形式：将 ' 替换为 ''
+fn escapeForPSSingleQuoted(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, src, '\'') == null) return allocator.dupe(u8, src);
+    var list: std.ArrayList(u8) = .empty;
+    defer list.deinit(allocator);
+    try list.ensureTotalCapacityPrecise(allocator, src.len + 8);
+    for (src) |c| {
+        if (c == '\'') {
+            try list.appendSlice(allocator, "''");
+        } else {
+            try list.append(allocator, c);
+        }
+    }
+    return list.toOwnedSlice(allocator);
+}
+
+// x-www-form-urlencoded 编码（最小实现）
+fn urlFormEncode(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+    try out.ensureTotalCapacityPrecise(allocator, s.len + s.len / 4);
+    const HEX = "0123456789ABCDEF";
+    for (s) |c| switch (c) {
+        'A'...'Z', 'a'...'z', '0'...'9', '-', '_', '.', '~' => try out.append(allocator, c),
+        ' ' => try out.appendSlice(allocator, "%20"),
+        else => {
+            try out.append(allocator, '%');
+            try out.append(allocator, HEX[(c >> 4) & 0xF]);
+            try out.append(allocator, HEX[c & 0xF]);
+        },
+    };
+    return out.toOwnedSlice(allocator);
+}
+
+// 构造 application/x-www-form-urlencoded 表单体
+fn allocFormEncoded(allocator: std.mem.Allocator, fields: []const struct { key: []const u8, v1: []const u8, v2: []const u8 }) ![]u8 {
+    var parts: std.ArrayList([]const u8) = .empty;
+    defer parts.deinit(allocator);
+    for (fields) |f| {
+        if (std.mem.eql(u8, f.key, "login_token")) {
+            const a = try urlFormEncode(allocator, f.v1);
+            defer allocator.free(a);
+            const b = try urlFormEncode(allocator, f.v2);
+            defer allocator.free(b);
+            const token = try std.fmt.allocPrint(allocator, "{s},{s}", .{ a, b });
+            defer allocator.free(token);
+            const key = try urlFormEncode(allocator, f.key);
+            defer allocator.free(key);
+            const kv = try std.fmt.allocPrint(allocator, "{s}={s}", .{ key, token });
+            try parts.append(allocator, kv);
+        } else if (f.v1.len != 0) {
+            const key = try urlFormEncode(allocator, f.key);
+            defer allocator.free(key);
+            const val = try urlFormEncode(allocator, f.v1);
+            defer allocator.free(val);
+            const kv = try std.fmt.allocPrint(allocator, "{s}={s}", .{ key, val });
+            try parts.append(allocator, kv);
+        }
+    }
+    const joined = try std.mem.join(allocator, "&", parts.items);
+    for (parts.items) |p| allocator.free(p);
+    return joined;
 }
 
 /// 使用 Zig 标准库解压 gzip 数据（基于 std.compress.flate）
