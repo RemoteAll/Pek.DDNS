@@ -9,24 +9,28 @@ const builtin = @import("builtin");
 extern "kernel32" fn SetConsoleOutputCP(wCodePageID: u32) c_int;
 extern "kernel32" fn SetConsoleCP(wCodePageID: u32) c_int;
 
-/// Windows 下等待用户按键，避免窗口一闪而过
+/// 跨平台等待用户按键，避免窗口一闪而过
 fn waitForKeyPress() void {
-    if (builtin.os.tag != .windows) return;
-
     logger.warn("", .{});
     logger.info("按任意键退出...", .{});
 
-    // 使用 Windows API ReadFile 等待用户输入
-    const w = std.os.windows;
-    const stdin_handle = w.kernel32.GetStdHandle(w.STD_INPUT_HANDLE);
-    if (stdin_handle == null or stdin_handle == w.INVALID_HANDLE_VALUE) return;
+    if (builtin.os.tag == .windows) {
+        // Windows: 使用 Windows API ReadFile
+        const w = std.os.windows;
+        const stdin_handle = w.kernel32.GetStdHandle(w.STD_INPUT_HANDLE);
+        if (stdin_handle == null or stdin_handle == w.INVALID_HANDLE_VALUE) return;
 
-    var buf: [1]u8 = undefined;
-    var bytes_read: w.DWORD = 0;
-    _ = w.kernel32.ReadFile(stdin_handle.?, &buf, 1, &bytes_read, null);
+        var buf: [1]u8 = undefined;
+        var bytes_read: w.DWORD = 0;
+        _ = w.kernel32.ReadFile(stdin_handle.?, &buf, 1, &bytes_read, null);
+    } else {
+        // Linux/macOS: 使用 POSIX read
+        var buf: [1]u8 = undefined;
+        _ = std.posix.read(std.posix.STDIN_FILENO, &buf) catch {};
+    }
 }
 
-/// 配置错误退出：显示错误信息后等待用户按键（仅 Windows）
+/// 配置错误退出：显示错误信息后等待用户按键（跨平台）
 fn configError() noreturn {
     waitForKeyPress();
     std.process.exit(1);
@@ -237,8 +241,8 @@ pub fn main() !void {
     Zig_DDNS.run(cfg) catch |err| {
         switch (err) {
             error.InvalidConfiguration => {
-                // 配置错误已在 dnspod_update 中打印详细信息，这里静默退出
-                std.process.exit(1);
+                // 配置错误已在 dnspod_update 中打印详细信息，等待用户按键后退出
+                configError();
             },
             error.MissingProviderConfig => {
                 std.debug.print("[错误] 缺少 Provider 配置，请检查 config.json\n", .{});
