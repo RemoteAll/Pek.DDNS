@@ -127,9 +127,13 @@ fn runReadCmd(allocator: std.mem.Allocator, exe: []const u8, args: []const []con
 }
 
 fn runPowerShell(allocator: std.mem.Allocator, command: []const u8) ![]u8 {
-    const args_pwsh = [_][]const u8{ "-NoProfile", "-Command", command };
+    // 在命令前添加 $ProgressPreference='SilentlyContinue' 禁用进度条输出到 stderr
+    const silent_cmd = try std.fmt.allocPrint(allocator, "$ProgressPreference='SilentlyContinue'; {s}", .{command});
+    defer allocator.free(silent_cmd);
+
+    const args_pwsh = [_][]const u8{ "-NoProfile", "-Command", silent_cmd };
     return runReadCmd(allocator, "pwsh", &args_pwsh) catch {
-        const args_ps = [_][]const u8{ "-NoProfile", "-Command", command };
+        const args_ps = [_][]const u8{ "-NoProfile", "-Command", silent_cmd };
         return runReadCmd(allocator, "powershell", &args_ps);
     };
 }
