@@ -1,2 +1,32 @@
+# Zig 构建产物
 .zig-cache/
 zig-out/
+
+# 配置文件（包含敏感信息）
+config.json
+config.json.backup
+config.json.real
+
+# 日志文件
+*.log
+ddns.log
+
+# 缓存文件
+ddns.cache
+*.cache
+
+# 编辑器和 IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 系统文件
+Thumbs.db
+desktop.ini
+
+# 临时文件
+*.tmp
+*.bak

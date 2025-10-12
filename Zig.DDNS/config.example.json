@@ -1,0 +1,14 @@
+{
+  "provider": "dnspod",
+  "domain": "example.com",
+  "sub_domain": "www",
+  "record_type": "A",
+  "interval_sec": 60,
+  "dnspod": {
+    "token_id": "你的TokenId",
+    "token": "你的Token值",
+    "line": "默认",
+    "ttl": 60
+  },
+  "ip_source_url": "https://t.sc8.fun/api/client-ip"
+}
