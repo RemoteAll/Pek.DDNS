@@ -125,6 +125,15 @@ const providers = struct {
         if (config.dnspod == null) return error.MissingProviderConfig;
         const dp = config.dnspod.?;
 
+        // 验证配置是否为默认占位符
+        if (std.mem.indexOf(u8, dp.token_id, "TokenId") != null or
+            std.mem.indexOf(u8, dp.token, "Token") != null)
+        {
+            std.debug.print("[错误] 请在 config.json 中配置真实的 DNSPod API Token\n", .{});
+            std.debug.print("[提示] token_id 和 token 当前仍为占位符，请访问 https://console.dnspod.cn/account/token/apikey 获取\n", .{});
+            return error.InvalidConfiguration;
+        }
+
         // DNSPod API: https://docs.dnspod.cn/api/5f26a529e5b5810a610d3714/
         // 主要步骤：
         // 1) 获取记录列表，找到指定 domain/sub_domain 的记录（Record.List）
@@ -159,6 +168,10 @@ const providers = struct {
             .{ dp.token_id, dp.token, domain, sub, rtype },
         );
         defer allocator.free(body);
+
+        std.debug.print("[dnspod request] URL: https://dnsapi.cn/Record.List\n", .{});
+        std.debug.print("[dnspod request] Body: {s}\n", .{body});
+
         const resp = try httpPostForm(allocator, "https://dnsapi.cn/Record.List", body);
         defer allocator.free(resp);
         // 简易解析：查找 "records":[{...}] 中第一条的 id 与 value
@@ -207,24 +220,48 @@ const providers = struct {
 };
 
 fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8) ![]u8 {
-    // 使用 Zig 0.15.1+ 内置 HTTP 客户端 POST 表单
+    // 使用 Zig 0.15.2+ 内置 HTTP 客户端 POST 表单
+    std.debug.print("[httpPostForm] 开始创建 HTTP 客户端...\n", .{});
     var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
+
+    std.debug.print("[httpPostForm] 解析 URI: {s}\n", .{url});
     const uri = try std.Uri.parse(url);
+
+    std.debug.print("[httpPostForm] 创建 POST 请求...\n", .{});
+    // 创建请求，添加完整的 HTTP 头
     var req = try client.request(.POST, uri, .{
         .extra_headers = &.{
             .{ .name = "content-type", .value = "application/x-www-form-urlencoded" },
+            .{ .name = "user-agent", .value = "Zig-DDNS/1.0" },
+            .{ .name = "accept", .value = "*/*" },
         },
     });
     defer req.deinit();
+
+    std.debug.print("[httpPostForm] 设置请求体长度: {d} 字节\n", .{body.len});
+    // 设置请求体长度
     req.transfer_encoding = .{ .content_length = body.len };
+
+    std.debug.print("[httpPostForm] 发送请求体...\n", .{});
+    // 发送请求体
     var body_writer = try req.sendBody(&.{});
     try body_writer.writer.writeAll(body);
     try body_writer.end();
+
+    std.debug.print("[httpPostForm] 等待接收响应头...\n", .{});
+    // 接收响应
     var redirect_buffer: [1024]u8 = undefined;
-    var response = try req.receiveHead(&redirect_buffer);
+    var response = req.receiveHead(&redirect_buffer) catch |err| {
+        std.debug.print("[httpPostForm ERROR] 接收响应头失败: {any}\n", .{err});
+        return err;
+    };
+
+    std.debug.print("[httpPostForm] 响应接收成功\n", .{});
+    std.debug.print("[httpPostForm] 读取响应体...\n", .{});
     const resp_buf = try response.reader(&.{}).allocRemaining(allocator, .unlimited);
     defer allocator.free(resp_buf);
+
     std.debug.print("[post encoding] gzip_magic={any}\n", .{isGzipMagic(resp_buf)});
     if (isGzipMagic(resp_buf)) {
         const unzipped = try gzipDecompress(allocator, resp_buf);
@@ -236,9 +273,7 @@ fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
     // 返回前复制一份，保证释放本地缓冲不会影响调用方
     const out = try allocator.dupe(u8, resp_buf);
     return out;
-}
-
-// 检测 gzip 魔数 (0x1F, 0x8B)
+} // 检测 gzip 魔数 (0x1F, 0x8B)
 fn isGzipMagic(buf: []const u8) bool {
     return buf.len >= 2 and buf[0] == 0x1F and buf[1] == 0x8B;
 }

@@ -1,13 +1,22 @@
 // Windows 控制台全局 UTF-8 支持
 // 仅在 Windows 下生效，其他平台无影响
-extern "kernel32" fn SetConsoleOutputCP(codePage: u32) callconv(.Stdcall) i32;
-extern "kernel32" fn SetConsoleCP(codePage: u32) callconv(.Stdcall) i32;
 const std = @import("std");
 const Zig_DDNS = @import("Zig_DDNS");
+
+// Windows API 函数声明（Zig 0.15.2+ 会自动使用正确的调用约定）
+extern "kernel32" fn SetConsoleOutputCP(wCodePageID: u32) c_int;
+extern "kernel32" fn SetConsoleCP(wCodePageID: u32) c_int;
+
 pub fn main() !void {
-    // Windows 控制台中文/颜色显示：启用虚拟终端处理（ANSI 序列）
+    // Windows 控制台中文/颜色显示：设置 UTF-8 编码并启用虚拟终端处理（ANSI 序列）
     if (@import("builtin").os.tag == .windows) {
         const w = std.os.windows;
+
+        // 设置控制台输入输出为 UTF-8 (代码页 65001)
+        _ = SetConsoleOutputCP(65001);
+        _ = SetConsoleCP(65001);
+
+        // 启用虚拟终端处理（支持 ANSI 转义序列）
         const h = w.kernel32.GetStdHandle(w.STD_OUTPUT_HANDLE);
         if (h != null and h != w.INVALID_HANDLE_VALUE) {
             var m: w.DWORD = 0;
@@ -186,7 +195,23 @@ pub fn main() !void {
         .ip_source_url = ip_source_url,
     };
 
-    try Zig_DDNS.run(cfg);
+    // 捕获特定错误，友好处理（不显示堆栈跟踪）
+    Zig_DDNS.run(cfg) catch |err| {
+        switch (err) {
+            error.InvalidConfiguration => {
+                // 配置错误已在 dnspod_update 中打印详细信息，这里静默退出
+                std.process.exit(1);
+            },
+            error.MissingProviderConfig => {
+                std.debug.print("[错误] 缺少 Provider 配置，请检查 config.json\n", .{});
+                std.process.exit(1);
+            },
+            else => {
+                // 其他错误继续抛出，显示堆栈跟踪以便调试
+                return err;
+            },
+        }
+    };
 }
 
 test "simple test" {
