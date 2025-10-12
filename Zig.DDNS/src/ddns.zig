@@ -54,7 +54,7 @@ fn runOnce(allocator: std.mem.Allocator, config: Config) !void {
 
 fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     // 使用 Zig 0.15.1+ 内置 HTTP 客户端获取公网 IP
-    var client = std.http.Client{ .allocator = allocator };
+    var client = std.http.Client{ .allocator = allocator, .write_buffer_size = 64 * 1024 };
     defer client.deinit();
     const uri = try std.Uri.parse(url);
     var req = try client.request(.GET, uri, .{});
@@ -142,11 +142,14 @@ const providers = struct {
 
         const record = try dnspod_find_record(allocator, dp, config.domain, config.sub_domain, config.record_type);
         if (record == null) {
+            std.debug.print("[dnspod] no existing record, will create {s}.{s} -> {s}\n", .{ config.sub_domain, config.domain, ip });
             try dnspod_create_record(allocator, dp, config.domain, config.sub_domain, config.record_type, ip, config);
             std.debug.print("[dnspod] created record {s}.{s} -> {s}\n", .{ config.sub_domain, config.domain, ip });
         } else {
             const r = record.?;
-            if (!std.mem.eql(u8, r.value, ip)) {
+            const need_update = !std.mem.eql(u8, r.value, ip);
+            if (need_update) {
+                std.debug.print("[dnspod] change detected: record value={s}, public ip={s} → will update\n", .{ r.value, ip });
                 try dnspod_modify_record(allocator, dp, r.id, config.domain, config.sub_domain, config.record_type, ip, config);
                 std.debug.print("[dnspod] updated record {s}.{s} -> {s}\n", .{ config.sub_domain, config.domain, ip });
             } else {
@@ -177,17 +180,36 @@ const providers = struct {
         // 打印接口原始 JSON（完整）
         std.debug.print("[dnspod response] {s}\n", .{resp});
         printDnspodStatus(allocator, resp);
-        // 简易解析：查找 "records":[{...}] 中第一条的 id 与 value
+        // 更严格的解析：限定在 records 数组第一条记录的对象范围内查找 id/value，避免误命中其他位置
+        const recs_key = "\"records\":[";
+        const recs_start = std.mem.indexOf(u8, resp, recs_key) orelse return null;
+        const after_recs = resp[recs_start + recs_key.len ..];
+        const first_obj_start_rel = std.mem.indexOfScalar(u8, after_recs, '{') orelse return null;
+        const obj_slice = after_recs[first_obj_start_rel..];
+        // 找到与之匹配的第一个对象的结束位置（简易括号计数）
+        var depth: i32 = 0;
+        var end_rel: ?usize = null;
+        for (obj_slice, 0..) |ch, i| {
+            if (ch == '{') depth += 1;
+            if (ch == '}') {
+                depth -= 1;
+                if (depth == 0) {
+                    end_rel = i;
+                    break;
+                }
+            }
+        }
+        const first_obj = if (end_rel) |e| obj_slice[0..(e + 1)] else return null;
         const id_key = "\"id\":\"";
         const value_key = "\"value\":\"";
-        const id_start = std.mem.indexOf(u8, resp, id_key) orelse return null;
-        const id_slice = resp[id_start + id_key.len ..];
-        const id_rel_end = std.mem.indexOf(u8, id_slice, "\"") orelse return null;
+        const id_start_rel = std.mem.indexOf(u8, first_obj, id_key) orelse return null;
+        const id_slice = first_obj[id_start_rel + id_key.len ..];
+        const id_rel_end = std.mem.indexOfScalar(u8, id_slice, '"') orelse return null;
         const id_val = id_slice[0..id_rel_end];
 
-        const val_start = std.mem.indexOf(u8, resp, value_key) orelse return null;
-        const val_slice = resp[val_start + value_key.len ..];
-        const val_rel_end = std.mem.indexOf(u8, val_slice, "\"") orelse return null;
+        const val_start_rel = std.mem.indexOf(u8, first_obj, value_key) orelse return null;
+        const val_slice = first_obj[val_start_rel + value_key.len ..];
+        const val_rel_end = std.mem.indexOfScalar(u8, val_slice, '"') orelse return null;
         const value_val = val_slice[0..val_rel_end];
 
         // 复制切片，避免释放 resp 后悬挂
@@ -207,6 +229,7 @@ const providers = struct {
             .{ .key = "value", .v1 = ip, .v2 = "" },
         });
         defer allocator.free(body);
+        std.debug.print("[dnspod] calling Record.Create domain={s} sub={s} type={s} value={s}\n", .{ domain, sub, rtype, ip });
         const resp = try httpPostForm(allocator, "https://dnsapi.cn/Record.Create", body);
         defer allocator.free(resp);
         std.debug.print("[dnspod response] {s}\n", .{resp});
@@ -227,6 +250,7 @@ const providers = struct {
             .{ .key = "value", .v1 = ip, .v2 = "" },
         });
         defer allocator.free(body);
+        std.debug.print("[dnspod] calling Record.Modify id={s} domain={s} sub={s} type={s} new_value={s}\n", .{ record_id, domain, sub, rtype, ip });
         const resp = try httpPostForm(allocator, "https://dnsapi.cn/Record.Modify", body);
         defer allocator.free(resp);
         std.debug.print("[dnspod response] {s}\n", .{resp});
@@ -236,9 +260,9 @@ const providers = struct {
 };
 
 fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8) ![]u8 {
-    // 使用 Zig 0.15.2+ 内置 HTTP 客户端 POST 表单
-    std.debug.print("[httpPostForm] 开始创建 HTTP 客户端...\n", .{});
-    var client = std.http.Client{ .allocator = allocator };
+    // 使用 Zig 0.15.2+ 低层 HTTP 客户端 POST 表单（稳定路径）
+    std.debug.print("[httpPostForm] 使用低层 request 发送 POST...\n", .{});
+    var client = std.http.Client{ .allocator = allocator, .write_buffer_size = 64 * 1024 };
     defer client.deinit();
 
     std.debug.print("[httpPostForm] 解析 URI: {s}\n", .{url});
@@ -252,7 +276,7 @@ fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
             .{ .name = "user-agent", .value = "Zig-DDNS/1.0" },
             .{ .name = "accept", .value = "*/*" },
             .{ .name = "accept-encoding", .value = "gzip, deflate" },
-            .{ .name = "connection", .value = "keep-alive" },
+            .{ .name = "connection", .value = "close" },
         },
     });
     defer req.deinit();
