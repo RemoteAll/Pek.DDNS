@@ -26,6 +26,8 @@ pub const DnsPodConfig = struct {
     token: []const u8, // token 值
     // 可选：记录线路, 例如 默认
     line: []const u8 = "默认",
+    // 可选：TTL 值（秒），最小 60，最大 604800（7天）
+    ttl: u32 = 600, // 默认 600 秒（10分钟）
 };
 
 pub fn run(config: Config) !void {
@@ -143,25 +145,38 @@ const providers = struct {
 
         const record = try dnspod_find_record(allocator, dp, config.domain, config.sub_domain, config.record_type);
         if (record == null) {
-            logger.info("dnspod: 未找到现有记录，将创建 {s}.{s} -> {s}", .{ config.sub_domain, config.domain, ip });
+            logger.info("dnspod: 未找到现有记录，将创建 {s}.{s} -> {s} (TTL={d})", .{ config.sub_domain, config.domain, ip, dp.ttl });
             try dnspod_create_record(allocator, dp, config.domain, config.sub_domain, config.record_type, ip, config);
-            logger.info("dnspod: 已创建记录 {s}.{s} -> {s}", .{ config.sub_domain, config.domain, ip });
+            logger.info("dnspod: 已创建记录 {s}.{s} -> {s} (TTL={d})", .{ config.sub_domain, config.domain, ip, dp.ttl });
         } else {
             const r = record.?;
-            const need_update = !std.mem.eql(u8, r.value, ip);
+            const ip_changed = !std.mem.eql(u8, r.value, ip);
+            const ttl_changed = r.ttl != dp.ttl;
+            const need_update = ip_changed or ttl_changed;
+
             if (need_update) {
-                logger.info("dnspod: 检测到变化 - 记录值={s}, 公网IP={s} → 将更新", .{ r.value, ip });
+                if (ip_changed and ttl_changed) {
+                    logger.info("dnspod: 检测到变化 - IP:{s}->{s}, TTL:{d}->{d} → 将更新", .{ r.value, ip, r.ttl, dp.ttl });
+                } else if (ip_changed) {
+                    logger.info("dnspod: 检测到 IP 变化 - {s} -> {s} → 将更新", .{ r.value, ip });
+                } else {
+                    logger.info("dnspod: 检测到 TTL 变化 - {d} -> {d} → 将更新", .{ r.ttl, dp.ttl });
+                }
                 try dnspod_modify_record(allocator, dp, r.id, config.domain, config.sub_domain, config.record_type, ip, config);
-                logger.info("dnspod: 已更新记录 {s}.{s} -> {s}", .{ config.sub_domain, config.domain, ip });
+                logger.info("dnspod: 已更新记录 {s}.{s} -> {s} (TTL={d})", .{ config.sub_domain, config.domain, ip, dp.ttl });
             } else {
-                logger.info("dnspod: {s}.{s} 无变化 (ip={s})", .{ config.sub_domain, config.domain, ip });
+                logger.info("dnspod: {s}.{s} 无变化 (ip={s}, ttl={d})", .{ config.sub_domain, config.domain, ip, r.ttl });
             }
             allocator.free(r.id);
             allocator.free(r.value);
         }
     }
 
-    const DnsPodRecord = struct { id: []const u8, value: []const u8 };
+    const DnsPodRecord = struct {
+        id: []const u8,
+        value: []const u8,
+        ttl: u32,
+    };
 
     fn dnspod_find_record(allocator: std.mem.Allocator, dp: DnsPodConfig, domain: []const u8, sub: []const u8, rtype: []const u8) !?DnsPodRecord {
         // POST https://dnsapi.cn/Record.List
@@ -203,6 +218,8 @@ const providers = struct {
         const first_obj = if (end_rel) |e| obj_slice[0..(e + 1)] else return null;
         const id_key = "\"id\":\"";
         const value_key = "\"value\":\"";
+        const ttl_key = "\"ttl\":\"";
+
         const id_start_rel = std.mem.indexOf(u8, first_obj, id_key) orelse return null;
         const id_slice = first_obj[id_start_rel + id_key.len ..];
         const id_rel_end = std.mem.indexOfScalar(u8, id_slice, '"') orelse return null;
@@ -213,13 +230,26 @@ const providers = struct {
         const val_rel_end = std.mem.indexOfScalar(u8, val_slice, '"') orelse return null;
         const value_val = val_slice[0..val_rel_end];
 
+        // 提取 TTL 值
+        const ttl_val: u32 = blk: {
+            const ttl_start_rel = std.mem.indexOf(u8, first_obj, ttl_key) orelse break :blk 600; // 默认 600
+            const ttl_slice = first_obj[ttl_start_rel + ttl_key.len ..];
+            const ttl_rel_end = std.mem.indexOfScalar(u8, ttl_slice, '"') orelse break :blk 600;
+            const ttl_str = ttl_slice[0..ttl_rel_end];
+            break :blk std.fmt.parseInt(u32, ttl_str, 10) catch 600;
+        };
+
         // 复制切片，避免释放 resp 后悬挂
         const id_copy = try allocator.dupe(u8, id_val);
         const val_copy = try allocator.dupe(u8, value_val);
-        return DnsPodRecord{ .id = id_copy, .value = val_copy };
+        return DnsPodRecord{ .id = id_copy, .value = val_copy, .ttl = ttl_val };
     }
 
     fn dnspod_create_record(allocator: std.mem.Allocator, dp: DnsPodConfig, domain: []const u8, sub: []const u8, rtype: []const u8, ip: []const u8, cfg: Config) !void {
+        // 将 TTL 转换为字符串
+        const ttl_str = try std.fmt.allocPrint(allocator, "{d}", .{dp.ttl});
+        defer allocator.free(ttl_str);
+
         const body = try allocFormEncoded(allocator, &.{
             .{ .key = "login_token", .v1 = dp.token_id, .v2 = dp.token },
             .{ .key = "format", .v1 = "json", .v2 = "" },
@@ -228,6 +258,7 @@ const providers = struct {
             .{ .key = "record_type", .v1 = rtype, .v2 = "" },
             .{ .key = "record_line", .v1 = cfg.dnspod.?.line, .v2 = "" },
             .{ .key = "value", .v1 = ip, .v2 = "" },
+            .{ .key = "ttl", .v1 = ttl_str, .v2 = "" },
         });
         defer allocator.free(body);
         logger.debug("dnspod Record.Create - domain={s} sub={s} type={s} value={s}", .{ domain, sub, rtype, ip });
@@ -240,6 +271,10 @@ const providers = struct {
     }
 
     fn dnspod_modify_record(allocator: std.mem.Allocator, dp: DnsPodConfig, record_id: []const u8, domain: []const u8, sub: []const u8, rtype: []const u8, ip: []const u8, cfg: Config) !void {
+        // 将 TTL 转换为字符串
+        const ttl_str = try std.fmt.allocPrint(allocator, "{d}", .{dp.ttl});
+        defer allocator.free(ttl_str);
+
         const body = try allocFormEncoded(allocator, &.{
             .{ .key = "login_token", .v1 = dp.token_id, .v2 = dp.token },
             .{ .key = "format", .v1 = "json", .v2 = "" },
@@ -249,6 +284,7 @@ const providers = struct {
             .{ .key = "record_type", .v1 = rtype, .v2 = "" },
             .{ .key = "record_line", .v1 = cfg.dnspod.?.line, .v2 = "" },
             .{ .key = "value", .v1 = ip, .v2 = "" },
+            .{ .key = "ttl", .v1 = ttl_str, .v2 = "" },
         });
         defer allocator.free(body);
         logger.debug("dnspod Record.Modify - id={s} domain={s} sub={s} type={s} new_value={s}", .{ record_id, domain, sub, rtype, ip });

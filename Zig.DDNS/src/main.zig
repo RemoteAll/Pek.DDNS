@@ -48,7 +48,8 @@ pub fn main() !void {
             "  \"dnspod\": {\n" ++
             "    \"token_id\": \"你的TokenId\",\n" ++
             "    \"token\": \"你的Token值\",\n" ++
-            "    \"line\": \"默认\"\n" ++
+            "    \"line\": \"默认\",\n" ++
+            "    \"ttl\": 60\n" ++
             "  },\n" ++
             "  \"ip_source_url\": \"https://t.sc8.fun/api/client-ip\"\n" ++
             "}\n";
@@ -185,6 +186,17 @@ pub fn main() !void {
         }
         break :blk v.string;
     };
+    const ttl_any = blk: {
+        const maybe = dnspod_obj.get("ttl");
+        if (maybe == null) break :blk 600; // 默认 600 秒
+        const v = maybe.?;
+        if (v != .integer) {
+            logger.err("dnspod.ttl 字段类型应为整数", .{});
+            return;
+        }
+        break :blk v.integer;
+    };
+    const ttl = @as(u32, @intCast(ttl_any));
 
     const cfg = Zig_DDNS.Config{
         .provider = provider,
@@ -192,7 +204,7 @@ pub fn main() !void {
         .sub_domain = sub_domain,
         .record_type = record_type,
         .interval_sec = interval_sec,
-        .dnspod = Zig_DDNS.ddns.DnsPodConfig{ .token_id = token_id, .token = token, .line = line },
+        .dnspod = Zig_DDNS.ddns.DnsPodConfig{ .token_id = token_id, .token = token, .line = line, .ttl = ttl },
         .ip_source_url = ip_source_url,
     };
 

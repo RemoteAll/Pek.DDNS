@@ -40,9 +40,14 @@ pub fn setLevel(level: Level) void {
 /// 获取当前时间戳字符串 (格式: YYYY-MM-DD HH:MM:SS)
 fn getTimestamp(allocator: std.mem.Allocator) ![]const u8 {
     const timestamp = std.time.timestamp();
-    const seconds_since_epoch: i64 = timestamp;
 
-    // 转换为本地时间 (简化版，使用 UTC)
+    // 获取本地时区偏移（秒）
+    const local_offset = getLocalTimezoneOffset();
+    const local_timestamp = timestamp + local_offset;
+
+    const seconds_since_epoch: i64 = local_timestamp;
+
+    // 转换为本地时间
     const days_since_epoch = @divFloor(seconds_since_epoch, 86400);
     const seconds_today = @mod(seconds_since_epoch, 86400);
 
@@ -59,6 +64,52 @@ fn getTimestamp(allocator: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
         year, month, day, hour, minute, second,
     });
+}
+
+/// 获取本地时区偏移量（秒）
+fn getLocalTimezoneOffset() i64 {
+    if (builtin.os.tag == .windows) {
+        // Windows: 直接调用 _get_timezone 或使用简化的 API
+        // 使用 extern 声明 Windows API
+        const LONG = i32;
+        const WCHAR = u16;
+
+        const SYSTEMTIME = extern struct {
+            wYear: u16,
+            wMonth: u16,
+            wDayOfWeek: u16,
+            wDay: u16,
+            wHour: u16,
+            wMinute: u16,
+            wSecond: u16,
+            wMilliseconds: u16,
+        };
+
+        const TIME_ZONE_INFORMATION = extern struct {
+            Bias: LONG,
+            StandardName: [32]WCHAR,
+            StandardDate: SYSTEMTIME,
+            StandardBias: LONG,
+            DaylightName: [32]WCHAR,
+            DaylightDate: SYSTEMTIME,
+            DaylightBias: LONG,
+        };
+
+        const GetTimeZoneInformation = struct {
+            extern "kernel32" fn GetTimeZoneInformation(lpTimeZoneInformation: *TIME_ZONE_INFORMATION) u32;
+        }.GetTimeZoneInformation;
+
+        var tzi: TIME_ZONE_INFORMATION = undefined;
+        _ = GetTimeZoneInformation(&tzi);
+
+        // Bias 是以分钟为单位的偏移，且是负值（例如 UTC+8 返回 -480）
+        // 需要转换为秒并反转符号
+        return -tzi.Bias * 60;
+    } else {
+        // Unix/Linux: 尝试读取 /etc/timezone 或使用环境变量
+        // 简化处理：假设 UTC+8（中国标准时间）
+        return 8 * 3600;
+    }
 }
 
 /// 跨平台打印函数：Windows 使用 WriteConsoleW 确保中文正确显示
