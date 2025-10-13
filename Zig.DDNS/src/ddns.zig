@@ -43,7 +43,43 @@ pub fn run(config: Config) !void {
     while (true) {
         const start_time = std.time.nanoTimestamp();
 
-        try runOnce(allocator, config);
+        // 捕获单次执行的错误，记录日志但不退出循环
+        runOnce(allocator, config) catch |err| {
+            switch (err) {
+                error.UnknownHostName => {
+                    logger.err("DNS 解析失败: 无法解析主机名", .{});
+                    logger.warn("可能原因: 网络连接问题、DNS 服务器不可用或主机名错误", .{});
+                    logger.info("将在下一个周期重试...", .{});
+                },
+                error.ConnectionRefused => {
+                    logger.err("连接被拒绝: 目标服务器拒绝连接", .{});
+                    logger.info("将在下一个周期重试...", .{});
+                },
+                error.NetworkUnreachable => {
+                    logger.err("网络不可达: 无法访问目标网络", .{});
+                    logger.info("将在下一个周期重试...", .{});
+                },
+                error.ConnectionTimedOut => {
+                    logger.err("连接超时: 网络响应超时", .{});
+                    logger.info("将在下一个周期重试...", .{});
+                },
+                error.HttpConnectionClosing => {
+                    logger.err("HTTP 连接被服务器关闭", .{});
+                    logger.warn("这可能是服务器端的问题或网络环境限制", .{});
+                    logger.info("将在下一个周期重试...", .{});
+                },
+                error.InvalidConfiguration, error.MissingProviderConfig => {
+                    // 配置错误是致命错误，应该立即退出
+                    logger.err("配置错误，无法继续运行", .{});
+                    return err;
+                },
+                else => {
+                    // 其他未知错误，记录详情但继续运行
+                    logger.err("执行失败: {s}", .{@errorName(err)});
+                    logger.info("将在下一个周期重试...", .{});
+                },
+            }
+        };
 
         // 计算执行耗时并动态调整睡眠时间，确保固定周期
         const end_time = std.time.nanoTimestamp();
@@ -71,9 +107,14 @@ fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     var client = std.http.Client{ .allocator = allocator, .write_buffer_size = 64 * 1024 };
     defer client.deinit();
     const uri = try std.Uri.parse(url);
+    logger.debug("GET {s}", .{url});
     var req = try client.request(.GET, uri, .{});
     defer req.deinit();
-    try req.sendBodiless();
+    // 在发送阶段增加带 URL 的错误日志
+    req.sendBodiless() catch |e| {
+        logger.err("GET {s} 失败: {s}", .{ url, @errorName(e) });
+        return e;
+    };
     var redirect_buffer: [1024]u8 = undefined;
     var response = try req.receiveHead(&redirect_buffer);
     const body = try response.reader(&.{}).allocRemaining(allocator, .unlimited);
@@ -321,6 +362,7 @@ fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
     const uri = try std.Uri.parse(url);
 
     logger.debug("httpPostForm: 创建 POST 请求", .{});
+    logger.debug("POST {s}", .{url});
     // 创建请求，添加完整的 HTTP 头（模拟标准浏览器/工具行为）
     var req = try client.request(.POST, uri, .{
         .extra_headers = &.{
@@ -339,15 +381,24 @@ fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
 
     logger.debug("httpPostForm: 发送请求体", .{});
     // 发送请求体
-    var body_writer = try req.sendBody(&.{});
-    try body_writer.writer.writeAll(body);
-    try body_writer.end();
+    var body_writer = req.sendBody(&.{}) catch |e| {
+        logger.err("POST {s} 建立连接/发送失败: {s}", .{ url, @errorName(e) });
+        return e;
+    };
+    body_writer.writer.writeAll(body) catch |e| {
+        logger.err("POST {s} 写入请求体失败: {s}", .{ url, @errorName(e) });
+        return e;
+    };
+    body_writer.end() catch |e| {
+        logger.err("POST {s} 结束请求体失败: {s}", .{ url, @errorName(e) });
+        return e;
+    };
 
     logger.debug("httpPostForm: 等待接收响应头", .{});
     // 接收响应
     var redirect_buffer: [1024]u8 = undefined;
     var response = req.receiveHead(&redirect_buffer) catch |err| {
-        logger.err("httpPostForm: 接收响应头失败 - {any}", .{err});
+        logger.err("httpPostForm: 接收响应头失败 - {any} - url={s}", .{ err, url });
         logger.warn("这通常意味着服务器在 HTTP 层之前就关闭了连接", .{});
         logger.warn("可能原因:", .{});
         logger.warn("  1) TLS 握手失败（证书问题）", .{});
