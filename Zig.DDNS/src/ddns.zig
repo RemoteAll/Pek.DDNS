@@ -41,6 +41,7 @@ pub fn run(config: Config) !void {
     }
 
     while (true) {
+        logger.debug("===== 开始新的更新周期 =====", .{});
         const start_time = std.time.nanoTimestamp();
 
         // 捕获单次执行的错误，记录日志但不退出循环
@@ -88,60 +89,95 @@ pub fn run(config: Config) !void {
 
         if (elapsed_ns < interval_ns) {
             const sleep_ns = interval_ns - elapsed_ns;
-            std.Thread.sleep(@as(u64, @intCast(sleep_ns)));
+            // 确保睡眠时间为正数
+            if (sleep_ns > 0) {
+                logger.debug("周期睡眠: {d}秒 (执行耗时: {d}ms)", .{
+                    @divFloor(sleep_ns, std.time.ns_per_s),
+                    @divFloor(elapsed_ns, std.time.ns_per_ms),
+                });
+                std.Thread.sleep(@as(u64, @intCast(sleep_ns)));
+            }
+        } else {
+            // 执行时间超过间隔，记录警告但继续运行
+            logger.warn("执行耗时 {d}ms 超过配置周期 {d}秒，立即开始下一轮", .{
+                @divFloor(elapsed_ns, std.time.ns_per_ms),
+                config.interval_sec,
+            });
         }
-        // 如果执行时间超过间隔，立即开始下一轮，避免累积延迟
     }
 }
 
 fn runOnce(allocator: std.mem.Allocator, config: Config) !void {
+    logger.debug("runOnce: 开始获取公网 IP", .{});
     const ip = try fetchPublicIPv4(allocator, config.ip_source_url);
     defer allocator.free(ip);
+    logger.debug("runOnce: 获取到 IP = {s}", .{ip});
+
+    logger.debug("runOnce: 开始更新 DNS 记录", .{});
     switch (config.provider) {
         .dnspod => try providers.dnspod_update(allocator, config, ip),
     }
+    logger.debug("runOnce: DNS 更新完成", .{});
 }
 
 fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
+    logger.debug("fetchPublicIPv4: 准备发起请求", .{});
     // 使用 Zig 0.15.1+ 内置 HTTP 客户端获取公网 IP
     var client = std.http.Client{ .allocator = allocator, .write_buffer_size = 64 * 1024 };
     defer client.deinit();
+
+    logger.debug("fetchPublicIPv4: 解析 URI", .{});
     const uri = try std.Uri.parse(url);
+
     logger.debug("GET {s}", .{url});
+    logger.debug("fetchPublicIPv4: 创建请求对象", .{});
     var req = try client.request(.GET, uri, .{});
     defer req.deinit();
+
     // 在发送阶段增加带 URL 的错误日志
+    logger.debug("fetchPublicIPv4: 发送请求...", .{});
     req.sendBodiless() catch |e| {
         logger.err("GET {s} 失败: {s}", .{ url, @errorName(e) });
         return e;
     };
+
+    logger.debug("fetchPublicIPv4: 接收响应头", .{});
     var redirect_buffer: [1024]u8 = undefined;
     var response = try req.receiveHead(&redirect_buffer);
+
+    logger.debug("fetchPublicIPv4: 读取响应体", .{});
     const body = try response.reader(&.{}).allocRemaining(allocator, .unlimited);
     defer allocator.free(body);
+
     // 打印是否检测到压缩（通过 gzip 魔数）
     const is_gzip = isGzipMagic(body);
     logger.debug("ip-source encoding gzip_magic={any}", .{is_gzip});
+
     if (is_gzip) {
+        logger.debug("fetchPublicIPv4: 开始 gzip 解压", .{});
         const unzipped = try gzipDecompress(allocator, body);
         logger.debug("ip-source gunzip: {s}", .{unzipped});
         defer allocator.free(unzipped);
         // 使用通用 JSON 工具库提取 Type 为 IPv4 的 Ip 字段
+        logger.debug("fetchPublicIPv4: 解析 JSON 提取 IP", .{});
         const ip_field = try json_utils.quickGetStringFromArray(allocator, unzipped, .{
             .match_key = "Type",
             .match_value = "IPv4",
             .target_key = "Ip",
         });
+        logger.debug("fetchPublicIPv4: 完成，IP = {s}", .{ip_field});
         return ip_field;
     } else {
         // 打印接口返回的原始数据，便于观察/调试
         logger.debug("ip-source raw: {s}", .{body});
         // 使用通用 JSON 工具库提取 Type 为 IPv4 的 Ip 字段
+        logger.debug("fetchPublicIPv4: 解析 JSON 提取 IP", .{});
         const ip_field = try json_utils.quickGetStringFromArray(allocator, body, .{
             .match_key = "Type",
             .match_value = "IPv4",
             .target_key = "Ip",
         });
+        logger.debug("fetchPublicIPv4: 完成，IP = {s}", .{ip_field});
         return ip_field;
     }
 }
