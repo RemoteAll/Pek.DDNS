@@ -55,15 +55,69 @@ fn getTimestamp(allocator: std.mem.Allocator) ![]const u8 {
     const minute: u32 = @intCast(@divFloor(@mod(seconds_today, 3600), 60));
     const second: u32 = @intCast(@mod(seconds_today, 60));
 
-    // 简化的日期计算 (从 1970-01-01 开始)
-    const year: u32 = @intCast(1970 + @divFloor(days_since_epoch, 365));
-    const day_of_year: u32 = @intCast(@mod(days_since_epoch, 365));
-    const month: u32 = @intCast(@min(@divFloor(day_of_year, 30) + 1, 12));
-    const day: u32 = @intCast(@mod(day_of_year, 30) + 1);
+    // 准确的日期计算（考虑闰年）
+    const date = epochDaysToDate(days_since_epoch);
 
     return std.fmt.allocPrint(allocator, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{
-        year, month, day, hour, minute, second,
+        date.year, date.month, date.day, hour, minute, second,
     });
+}
+
+/// 日期结构
+const Date = struct {
+    year: u32,
+    month: u32,
+    day: u32,
+};
+
+/// 判断是否为闰年
+fn isLeapYear(year: i64) bool {
+    return (@rem(year, 4) == 0 and @rem(year, 100) != 0) or (@rem(year, 400) == 0);
+}
+
+/// 获取指定月份的天数
+fn getDaysInMonth(year: i64, month: u32) u32 {
+    const days = [_]u32{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (month == 2 and isLeapYear(year)) {
+        return 29;
+    }
+    return days[month - 1];
+}
+
+/// 将 epoch 天数转换为日期
+fn epochDaysToDate(days: i64) Date {
+    // 从 1970-01-01 开始计算
+    var year: i64 = 1970;
+    var remaining_days = days;
+
+    // 计算年份
+    while (true) {
+        const days_in_year: i64 = if (isLeapYear(year)) 366 else 365;
+        if (remaining_days < days_in_year) {
+            break;
+        }
+        remaining_days -= days_in_year;
+        year += 1;
+    }
+
+    // 计算月份和日期
+    var month: u32 = 1;
+    while (month <= 12) {
+        const days_in_month = getDaysInMonth(year, month);
+        if (remaining_days < days_in_month) {
+            break;
+        }
+        remaining_days -= days_in_month;
+        month += 1;
+    }
+
+    const day: u32 = @intCast(remaining_days + 1);
+
+    return Date{
+        .year = @intCast(year),
+        .month = month,
+        .day = day,
+    };
 }
 
 /// 获取本地时区偏移量（秒）
