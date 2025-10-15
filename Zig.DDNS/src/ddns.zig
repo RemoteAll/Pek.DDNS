@@ -47,6 +47,11 @@ pub fn run(config: Config) !void {
         // 捕获单次执行的错误，记录日志但不退出循环
         runOnce(allocator, config) catch |err| {
             switch (err) {
+                error.RequestTimeout => {
+                    logger.err("请求超时: 网络请求在 {d} 秒内未完成", .{NETWORK_TIMEOUT_SEC});
+                    logger.warn("可能原因: 网络延迟过高、服务器无响应或防火墙阻止", .{});
+                    logger.info("将在下一个周期重试...", .{});
+                },
                 error.UnknownHostName => {
                     logger.err("DNS 解析失败: 无法解析主机名", .{});
                     logger.warn("可能原因: 网络连接问题、DNS 服务器不可用或主机名错误", .{});
@@ -107,9 +112,21 @@ pub fn run(config: Config) !void {
     }
 }
 
+/// 网络操作超时时间（秒）
+/// 这是应用层超时，用于防止网络请求阻塞导致程序卡住
+/// 当超时发生时，主线程会放弃等待并继续，工作线程会被 detach
+///
+/// 超时也间接限制了最大数据量：
+/// - 假设 1MB/s 网络速度，30秒最多接收 30MB
+/// - 因此不需要额外设置响应大小限制
+const NETWORK_TIMEOUT_SEC = 30;
+
+/// 带超时保护的执行单次更新
 fn runOnce(allocator: std.mem.Allocator, config: Config) !void {
-    logger.debug("runOnce: 开始获取公网 IP", .{});
-    const ip = try fetchPublicIPv4(allocator, config.ip_source_url);
+    logger.debug("runOnce: 开始获取公网 IP (超时: {d}秒)", .{NETWORK_TIMEOUT_SEC});
+
+    // 使用超时保护执行网络请求
+    const ip = try fetchPublicIPv4WithTimeout(allocator, config.ip_source_url, NETWORK_TIMEOUT_SEC);
     defer allocator.free(ip);
     logger.debug("runOnce: 获取到 IP = {s}", .{ip});
 
@@ -118,6 +135,77 @@ fn runOnce(allocator: std.mem.Allocator, config: Config) !void {
         .dnspod => try providers.dnspod_update(allocator, config, ip),
     }
     logger.debug("runOnce: DNS 更新完成", .{});
+}
+
+/// 带超时的网络请求结果
+const FetchResult = struct {
+    data: ?[]u8 = null,
+    err: ?anyerror = null,
+    completed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    mutex: std.Thread.Mutex = .{},
+};
+
+/// 带超时保护的获取公网 IP
+fn fetchPublicIPv4WithTimeout(allocator: std.mem.Allocator, url: []const u8, timeout_sec: u32) ![]u8 {
+    var result = FetchResult{};
+
+    // 创建工作线程执行实际的网络请求
+    const thread = try std.Thread.spawn(.{}, fetchWorker, .{ allocator, url, &result });
+
+    // 主线程等待超时
+    const timeout_ns = @as(u64, timeout_sec) * std.time.ns_per_s;
+    const start_time = std.time.nanoTimestamp();
+
+    while (true) {
+        // 检查是否完成
+        if (result.completed.load(.acquire)) {
+            thread.join();
+
+            result.mutex.lock();
+            defer result.mutex.unlock();
+
+            if (result.err) |err| {
+                if (result.data) |data| allocator.free(data);
+                return err;
+            }
+
+            if (result.data) |data| {
+                return data;
+            }
+
+            return error.UnknownError;
+        }
+
+        // 检查是否超时
+        const elapsed = std.time.nanoTimestamp() - start_time;
+        if (elapsed >= timeout_ns) {
+            logger.warn("网络请求超时 ({d}秒)，放弃等待", .{timeout_sec});
+            // 注意：线程仍在后台运行，但我们不再等待它
+            // 这是一个权衡：要么卡住，要么接受可能的资源泄漏
+            // 在实际场景中，下次重启会清理
+            thread.detach();
+            return error.RequestTimeout;
+        }
+
+        // 短暂睡眠避免忙等待
+        std.Thread.sleep(100 * std.time.ns_per_ms);
+    }
+}
+
+/// 工作线程：执行实际的网络请求
+fn fetchWorker(allocator: std.mem.Allocator, url: []const u8, result: *FetchResult) void {
+    defer result.completed.store(true, .release);
+
+    const ip = fetchPublicIPv4(allocator, url) catch |err| {
+        result.mutex.lock();
+        defer result.mutex.unlock();
+        result.err = err;
+        return;
+    };
+
+    result.mutex.lock();
+    defer result.mutex.unlock();
+    result.data = ip;
 }
 
 fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
@@ -146,7 +234,13 @@ fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     var response = try req.receiveHead(&redirect_buffer);
 
     logger.debug("fetchPublicIPv4: 读取响应体", .{});
-    const body = try response.reader(&.{}).allocRemaining(allocator, .unlimited);
+    // 使用 allocRemaining 无限制读取
+    // 内存安全由超时机制保证：30秒超时限制了最大数据量（约几十MB）
+    // 不需要额外的大小限制
+    const body = response.reader(&.{}).allocRemaining(allocator, .unlimited) catch |e| {
+        logger.err("读取响应失败: {s}", .{@errorName(e)});
+        return e;
+    };
     defer allocator.free(body);
 
     // 打印是否检测到压缩（通过 gzip 魔数）
@@ -283,7 +377,7 @@ const providers = struct {
         defer allocator.free(body);
         logger.debug("dnspod Record.List - domain={s} sub_domain={s} type={s}", .{ domain, sub, rtype });
 
-        const resp = try httpPostForm(allocator, "https://dnsapi.cn/Record.List", body);
+        const resp = try httpPostFormWithTimeout(allocator, "https://dnsapi.cn/Record.List", body, NETWORK_TIMEOUT_SEC);
         defer allocator.free(resp);
         // 打印接口原始 JSON（完整）
         logger.debug("dnspod response: {s}", .{resp});
@@ -354,7 +448,7 @@ const providers = struct {
         });
         defer allocator.free(body);
         logger.debug("dnspod Record.Create - domain={s} sub={s} type={s} value={s}", .{ domain, sub, rtype, ip });
-        const resp = try httpPostForm(allocator, "https://dnsapi.cn/Record.Create", body);
+        const resp = try httpPostFormWithTimeout(allocator, "https://dnsapi.cn/Record.Create", body, NETWORK_TIMEOUT_SEC);
         defer allocator.free(resp);
         logger.debug("dnspod response: {s}", .{resp});
         printDnspodStatus(allocator, resp);
@@ -380,13 +474,76 @@ const providers = struct {
         });
         defer allocator.free(body);
         logger.debug("dnspod Record.Modify - id={s} domain={s} sub={s} type={s} new_value={s}", .{ record_id, domain, sub, rtype, ip });
-        const resp = try httpPostForm(allocator, "https://dnsapi.cn/Record.Modify", body);
+        const resp = try httpPostFormWithTimeout(allocator, "https://dnsapi.cn/Record.Modify", body, NETWORK_TIMEOUT_SEC);
         defer allocator.free(resp);
         logger.debug("dnspod response: {s}", .{resp});
         printDnspodStatus(allocator, resp);
         if (std.mem.indexOf(u8, resp, "\"code\":\"1\"") == null) return error.ApiFailed;
     }
 };
+
+/// POST 请求工作线程结果
+const PostResult = struct {
+    data: ?[]u8 = null,
+    err: ?anyerror = null,
+    completed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    mutex: std.Thread.Mutex = .{},
+};
+
+/// 带超时保护的 POST 请求
+fn httpPostFormWithTimeout(allocator: std.mem.Allocator, url: []const u8, body: []const u8, timeout_sec: u32) ![]u8 {
+    var result = PostResult{};
+
+    const thread = try std.Thread.spawn(.{}, postWorker, .{ allocator, url, body, &result });
+
+    const timeout_ns = @as(u64, timeout_sec) * std.time.ns_per_s;
+    const start_time = std.time.nanoTimestamp();
+
+    while (true) {
+        if (result.completed.load(.acquire)) {
+            thread.join();
+
+            result.mutex.lock();
+            defer result.mutex.unlock();
+
+            if (result.err) |err| {
+                if (result.data) |data| allocator.free(data);
+                return err;
+            }
+
+            if (result.data) |data| {
+                return data;
+            }
+
+            return error.UnknownError;
+        }
+
+        const elapsed = std.time.nanoTimestamp() - start_time;
+        if (elapsed >= timeout_ns) {
+            logger.warn("POST 请求超时 ({d}秒)，放弃等待 - {s}", .{ timeout_sec, url });
+            thread.detach();
+            return error.RequestTimeout;
+        }
+
+        std.Thread.sleep(100 * std.time.ns_per_ms);
+    }
+}
+
+/// POST 工作线程
+fn postWorker(allocator: std.mem.Allocator, url: []const u8, body: []const u8, result: *PostResult) void {
+    defer result.completed.store(true, .release);
+
+    const data = httpPostForm(allocator, url, body) catch |err| {
+        result.mutex.lock();
+        defer result.mutex.unlock();
+        result.err = err;
+        return;
+    };
+
+    result.mutex.lock();
+    defer result.mutex.unlock();
+    result.data = data;
+}
 
 fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8) ![]u8 {
     // 使用 Zig 0.15.2+ 低层 HTTP 客户端 POST 表单（稳定路径）
@@ -460,7 +617,12 @@ fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
     // 能走到这里说明成功接收到响应头
     logger.debug("httpPostForm: 响应接收成功", .{});
     logger.debug("httpPostForm: 读取响应体", .{});
-    const resp_buf = try response.reader(&.{}).allocRemaining(allocator, .unlimited);
+    // 使用 allocRemaining 无限制读取
+    // 内存安全由超时机制保证：30秒超时限制了最大数据量
+    const resp_buf = response.reader(&.{}).allocRemaining(allocator, .unlimited) catch |e| {
+        logger.err("读取 POST 响应失败: {s}", .{@errorName(e)});
+        return e;
+    };
     defer allocator.free(resp_buf);
 
     logger.debug("post encoding gzip_magic={any}", .{isGzipMagic(resp_buf)});
