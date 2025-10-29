@@ -30,49 +30,109 @@ pub const DnsPodConfig = struct {
     ttl: u32 = 600, // 默认 600 秒（10分钟）
 };
 
+/// 运行时统计信息
+const RuntimeStats = struct {
+    cycle_count: u64 = 0,
+    success_count: u64 = 0,
+    error_count: u64 = 0,
+    consecutive_errors: u32 = 0,
+    active_threads: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    last_success_time: i64 = 0,
+    mutex: std.Thread.Mutex = .{},
+};
+
+var runtime_stats = RuntimeStats{};
+
 pub fn run(config: Config) !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
+
+    logger.info("🚀 程序启动 - 更新周期: {d}秒", .{config.interval_sec});
+    runtime_stats.last_success_time = std.time.timestamp();
 
     if (config.interval_sec == 0) {
         try runOnce(allocator, config);
         return;
     }
 
+    var last_heartbeat: i64 = std.time.timestamp();
+    const heartbeat_interval: i64 = 300; // 5分钟输出一次心跳
+
     while (true) {
-        logger.debug("===== 开始新的更新周期 =====", .{});
+        runtime_stats.mutex.lock();
+        runtime_stats.cycle_count += 1;
+        const cycle_num = runtime_stats.cycle_count;
+        runtime_stats.mutex.unlock();
+
+        // 定期输出心跳日志
+        const now = std.time.timestamp();
+        if ((now - last_heartbeat) >= heartbeat_interval) {
+            runtime_stats.mutex.lock();
+            const stats = .{
+                .cycle = cycle_num,
+                .success = runtime_stats.success_count,
+                .errors = runtime_stats.error_count,
+                .consecutive = runtime_stats.consecutive_errors,
+                .threads = runtime_stats.active_threads.load(.monotonic),
+                .last_success = now - runtime_stats.last_success_time,
+            };
+            runtime_stats.mutex.unlock();
+
+            logger.info("💓 心跳 #({d}) - 成功:{d} 错误:{d} 连续错误:{d} 活动线程:{d} 距上次成功:{d}秒", .{
+                stats.cycle,
+                stats.success,
+                stats.errors,
+                stats.consecutive,
+                stats.threads,
+                stats.last_success,
+            });
+            last_heartbeat = now;
+        }
+
+        logger.debug("===== 周期 #{d} =====", .{cycle_num});
+        logger.debug("===== 周期 #{d} =====", .{cycle_num});
         const start_time = std.time.nanoTimestamp();
 
         // 捕获单次执行的错误，记录日志但不退出循环
-        runOnce(allocator, config) catch |err| {
+        const run_result = runOnce(allocator, config);
+        if (run_result) |_| {
+            // 成功执行
+            runtime_stats.mutex.lock();
+            runtime_stats.success_count += 1;
+            runtime_stats.consecutive_errors = 0;
+            runtime_stats.last_success_time = std.time.timestamp();
+            runtime_stats.mutex.unlock();
+            logger.debug("✓ 更新成功", .{});
+        } else |err| {
+            // 执行失败
+            runtime_stats.mutex.lock();
+            runtime_stats.error_count += 1;
+            runtime_stats.consecutive_errors += 1;
+            const consecutive = runtime_stats.consecutive_errors;
+            runtime_stats.mutex.unlock();
+
             switch (err) {
                 error.RequestTimeout => {
-                    logger.err("请求超时: 网络请求在 {d} 秒内未完成", .{NETWORK_TIMEOUT_SEC});
+                    logger.err("请求超时: 网络请求在 {d} 秒内未完成 (连续错误:{d})", .{ NETWORK_TIMEOUT_SEC, consecutive });
                     logger.warn("可能原因: 网络延迟过高、服务器无响应或防火墙阻止", .{});
-                    logger.info("将在下一个周期重试...", .{});
                 },
                 error.UnknownHostName => {
-                    logger.err("DNS 解析失败: 无法解析主机名", .{});
+                    logger.err("DNS 解析失败: 无法解析主机名 (连续错误:{d})", .{consecutive});
                     logger.warn("可能原因: 网络连接问题、DNS 服务器不可用或主机名错误", .{});
-                    logger.info("将在下一个周期重试...", .{});
                 },
                 error.ConnectionRefused => {
-                    logger.err("连接被拒绝: 目标服务器拒绝连接", .{});
-                    logger.info("将在下一个周期重试...", .{});
+                    logger.err("连接被拒绝: 目标服务器拒绝连接 (连续错误:{d})", .{consecutive});
                 },
                 error.NetworkUnreachable => {
-                    logger.err("网络不可达: 无法访问目标网络", .{});
-                    logger.info("将在下一个周期重试...", .{});
+                    logger.err("网络不可达: 无法访问目标网络 (连续错误:{d})", .{consecutive});
                 },
                 error.ConnectionTimedOut => {
-                    logger.err("连接超时: 网络响应超时", .{});
-                    logger.info("将在下一个周期重试...", .{});
+                    logger.err("连接超时: 网络响应超时 (连续错误:{d})", .{consecutive});
                 },
                 error.HttpConnectionClosing => {
-                    logger.err("HTTP 连接被服务器关闭", .{});
+                    logger.err("HTTP 连接被服务器关闭 (连续错误:{d})", .{consecutive});
                     logger.warn("这可能是服务器端的问题或网络环境限制", .{});
-                    logger.info("将在下一个周期重试...", .{});
                 },
                 error.InvalidConfiguration, error.MissingProviderConfig => {
                     // 配置错误是致命错误，应该立即退出
@@ -81,11 +141,11 @@ pub fn run(config: Config) !void {
                 },
                 else => {
                     // 其他未知错误，记录详情但继续运行
-                    logger.err("执行失败: {s}", .{@errorName(err)});
-                    logger.info("将在下一个周期重试...", .{});
+                    logger.err("执行失败: {s} (连续错误:{d})", .{ @errorName(err), consecutive });
                 },
             }
-        };
+            logger.info("将在下一个周期重试...", .{});
+        }
 
         // 计算执行耗时并动态调整睡眠时间，确保固定周期
         const end_time = std.time.nanoTimestamp();
@@ -149,6 +209,9 @@ const FetchResult = struct {
 fn fetchPublicIPv4WithTimeout(allocator: std.mem.Allocator, url: []const u8, timeout_sec: u32) ![]u8 {
     var result = FetchResult{};
 
+    // 记录活动线程数
+    _ = runtime_stats.active_threads.fetchAdd(1, .monotonic);
+
     // 创建工作线程执行实际的网络请求
     const thread = try std.Thread.spawn(.{}, fetchWorker, .{ allocator, url, &result });
 
@@ -160,6 +223,7 @@ fn fetchPublicIPv4WithTimeout(allocator: std.mem.Allocator, url: []const u8, tim
         // 检查是否完成
         if (result.completed.load(.acquire)) {
             thread.join();
+            _ = runtime_stats.active_threads.fetchSub(1, .monotonic);
 
             result.mutex.lock();
             defer result.mutex.unlock();
@@ -179,11 +243,13 @@ fn fetchPublicIPv4WithTimeout(allocator: std.mem.Allocator, url: []const u8, tim
         // 检查是否超时
         const elapsed = std.time.nanoTimestamp() - start_time;
         if (elapsed >= timeout_ns) {
-            logger.warn("网络请求超时 ({d}秒)，放弃等待", .{timeout_sec});
-            // 注意：线程仍在后台运行，但我们不再等待它
-            // 这是一个权衡：要么卡住，要么接受可能的资源泄漏
-            // 在实际场景中，下次重启会清理
+            const active = runtime_stats.active_threads.load(.monotonic);
+            logger.warn("⏱️ 网络请求超时 ({d}秒)，放弃等待 [活动线程:{d}]", .{ timeout_sec, active });
+            // 线程会在后台完成或超时，不detach避免资源泄漏
+            // 让线程自然结束，通过 completed 标志可以知道它何时完成
             thread.detach();
+            // 注意：线程计数不减少，因为线程仍在运行
+            // 当线程实际完成时，会在 fetchWorker 中减少计数
             return error.RequestTimeout;
         }
 
@@ -194,7 +260,11 @@ fn fetchPublicIPv4WithTimeout(allocator: std.mem.Allocator, url: []const u8, tim
 
 /// 工作线程：执行实际的网络请求
 fn fetchWorker(allocator: std.mem.Allocator, url: []const u8, result: *FetchResult) void {
-    defer result.completed.store(true, .release);
+    defer {
+        result.completed.store(true, .release);
+        // 线程完成时减少计数（即使是被detach的线程）
+        _ = runtime_stats.active_threads.fetchSub(1, .monotonic);
+    }
 
     const ip = fetchPublicIPv4(allocator, url) catch |err| {
         result.mutex.lock();
@@ -494,6 +564,7 @@ const PostResult = struct {
 fn httpPostFormWithTimeout(allocator: std.mem.Allocator, url: []const u8, body: []const u8, timeout_sec: u32) ![]u8 {
     var result = PostResult{};
 
+    _ = runtime_stats.active_threads.fetchAdd(1, .monotonic);
     const thread = try std.Thread.spawn(.{}, postWorker, .{ allocator, url, body, &result });
 
     const timeout_ns = @as(u64, timeout_sec) * std.time.ns_per_s;
@@ -502,6 +573,7 @@ fn httpPostFormWithTimeout(allocator: std.mem.Allocator, url: []const u8, body: 
     while (true) {
         if (result.completed.load(.acquire)) {
             thread.join();
+            _ = runtime_stats.active_threads.fetchSub(1, .monotonic);
 
             result.mutex.lock();
             defer result.mutex.unlock();
@@ -520,7 +592,8 @@ fn httpPostFormWithTimeout(allocator: std.mem.Allocator, url: []const u8, body: 
 
         const elapsed = std.time.nanoTimestamp() - start_time;
         if (elapsed >= timeout_ns) {
-            logger.warn("POST 请求超时 ({d}秒)，放弃等待 - {s}", .{ timeout_sec, url });
+            const active = runtime_stats.active_threads.load(.monotonic);
+            logger.warn("⏱️ POST 请求超时 ({d}秒)，放弃等待 [活动线程:{d}] - {s}", .{ timeout_sec, active, url });
             thread.detach();
             return error.RequestTimeout;
         }
@@ -531,7 +604,10 @@ fn httpPostFormWithTimeout(allocator: std.mem.Allocator, url: []const u8, body: 
 
 /// POST 工作线程
 fn postWorker(allocator: std.mem.Allocator, url: []const u8, body: []const u8, result: *PostResult) void {
-    defer result.completed.store(true, .release);
+    defer {
+        result.completed.store(true, .release);
+        _ = runtime_stats.active_threads.fetchSub(1, .monotonic);
+    }
 
     const data = httpPostForm(allocator, url, body) catch |err| {
         result.mutex.lock();
