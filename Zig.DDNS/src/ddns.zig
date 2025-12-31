@@ -287,17 +287,35 @@ fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     logger.debug("fetchPublicIPv4: 解析 URI", .{});
     const uri = try std.Uri.parse(url);
 
-    logger.debug("GET {s}", .{url});
+    logger.debug("POST {s} (form: from=hlktech-nuget)", .{url});
     logger.debug("fetchPublicIPv4: 创建请求对象", .{});
-    var req = try client.request(.GET, uri, .{});
+
+    // 准备表单数据
+    const form_data = "from=hlktech-nuget";
+
+    var req = try client.request(.POST, uri, .{
+        .extra_headers = &.{
+            .{ .name = "content-type", .value = "application/x-www-form-urlencoded" },
+        },
+    });
     defer req.deinit();
+
+    req.transfer_encoding = .{ .content_length = form_data.len };
 
     // 在发送阶段增加带 URL 的错误日志
     logger.debug("fetchPublicIPv4: 发送请求...", .{});
-    req.sendBodiless() catch |e| {
-        logger.err("GET {s} 失败: {s}", .{ url, @errorName(e) });
+    var body_writer = req.sendBody(&.{}) catch |e| {
+        logger.err("POST {s} 失败: {s}", .{ url, @errorName(e) });
         return e;
     };
+
+    // 写入表单数据
+    body_writer.writer.writeAll(form_data) catch |e| {
+        logger.err("写入表单数据失败: {s}", .{@errorName(e)});
+        return e;
+    };
+
+    try body_writer.end();
 
     logger.debug("fetchPublicIPv4: 接收响应头", .{});
     var redirect_buffer: [1024]u8 = undefined;
