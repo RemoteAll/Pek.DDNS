@@ -1,6 +1,6 @@
 # PeiKeSmart Copilot 协作指令
 
-本说明适用于沛柯智能（PeiKeSmart）及其全部开源 / 衍生项目。本指令用于规范在这些项目中使用 Copilot（及类似智能助手）时的行为，主要面向 Zig 0.15.2及以上 技术栈。
+本说明适用于沛柯智能（PeiKeSmart）及其全部开源 / 衍生项目。本指令用于规范在这些项目中使用 Copilot（及类似智能助手）时的行为，主要面向 Zig 0.15.2及以上 技术栈。你将作为 Zig 资深核心开发者，协助完成代码编写、重构、修复和文档工作。请严格遵守以下规范，确保输出代码的质量、一致性和可维护性。
 
 ## 1. 目标
 - 提效：减少机械样板劳动，聚焦业务/核心算法。
@@ -32,6 +32,7 @@
 - 忌全量重排、无差异格式化提交。
 - 禁止擅自删除已有代码注释（含单行 // 与 XML 文档注释），可以修改或追加；禁止单独“清理”一片注释块或仅删除空白行来制造差异。
 - 不得仅为对齐或所谓美观批量移除、合并空白行；保留有意的逻辑分隔空行。仅在同一局部有真实代码增删且需要保持统一时才可适度调整。
+- 要考虑多平台的兼容，比如Windows/Linux/Macos/ARM等，要尽可能的保留跨平台的代码实现方式，避免使用仅在某个平台上可用的API或特性。如果必须使用平台特定的代码，需添加清晰注释并考虑条件编译。
 
 ### 5.1 可读性优先（就近）
 - 局部变量就近声明：在首次使用前的最近位置声明，避免集中在方法开头。
@@ -48,11 +49,97 @@
 	- `std.mem.dupe` → 改为 `allocator.dupe`。
 	- `std.mem.copy` 语法变更，需查阅新版文档。
 	- `std.process.getEnvMap` 返回值类型变化，需用 `var` 而非 `const`。
-	- `std.ArrayList.init` 构造方式已调整，推荐用 `ArrayList(Type).init(allocator)`。
 	- 其他 API 变动请参考 Zig 官方 changelog。
 - 编写新代码时，优先查阅 Zig 0.15.2+ 官方文档，避免参考旧版示例。
 - 迁移/重构时，需逐一排查所有 API 用法，确保无旧接口残留。
 - 如遇编译报错涉及 API 变动，优先查 changelog 或官方文档，禁止临时绕过。
+
+### 5.2.1 ArrayList API 重大变更（Zig 0.15.2+）
+
+**核心变更：** `std.ArrayList(T)` 返回的是 `Aligned(T, null)` 类型，该类型不再内部存储 allocator。
+
+**禁止使用的旧 API：**
+- ❌ `std.ArrayList(T).init(allocator)` — 此方法已移除
+- ❌ `list.deinit()` — 缺少必需的 allocator 参数
+- ❌ `list.append(item)` — 缺少必需的 allocator 参数
+
+**正确用法：**
+
+1. **初始化 ArrayList**
+   ```zig
+   // 方式 1: 使用空结构体字面量（推荐）
+   var list: std.ArrayList(T) = .{};
+   
+   // 方式 2: 显式指定字段
+   var list = std.ArrayList(T){ .items = &.{}, .capacity = 0 };
+   
+   // 方式 3: 使用预定义的空常量
+   var list = std.ArrayList(T).empty;
+   ```
+
+2. **释放 ArrayList**
+   ```zig
+   // 必须传入 allocator
+   defer list.deinit(allocator);
+   ```
+
+3. **添加元素**
+   ```zig
+   // 必须传入 allocator 作为第一个参数
+   try list.append(allocator, item);
+   ```
+
+4. **其他常用操作**
+   ```zig
+   // 删除元素（不需要 allocator）
+   _ = list.orderedRemove(index);
+   const removed = list.swapRemove(index);
+   
+   // 访问元素（不变）
+   const item = list.items[index];
+   const len = list.items.len;
+   
+   // 清空但保留容量
+   list.clearRetainingCapacity();
+   
+   // 清空并释放内存
+   list.clearAndFree(allocator);
+   ```
+
+5. **结构体字段中的 ArrayList**
+   ```zig
+   pub const MyStruct = struct {
+       allocator: Allocator,
+       my_list: std.ArrayList(Item),
+       
+       pub fn init(allocator: Allocator) !MyStruct {
+           return MyStruct{
+               .allocator = allocator,
+               .my_list = .{},  // 使用空字面量初始化
+           };
+       }
+       
+       pub fn deinit(self: *MyStruct) void {
+           self.my_list.deinit(self.allocator);  // 传入 allocator
+       }
+       
+       pub fn addItem(self: *MyStruct, item: Item) !void {
+           try self.my_list.append(self.allocator, item);  // 传入 allocator
+       }
+   };
+   ```
+
+**迁移检查清单：**
+- [ ] 所有 `ArrayList.init(allocator)` 改为 `.{}` 或等效形式
+- [ ] 所有 `list.deinit()` 改为 `list.deinit(allocator)`
+- [ ] 所有 `list.append(item)` 改为 `list.append(allocator, item)`
+- [ ] 所有 `list.appendSlice(slice)` 改为 `list.appendSlice(allocator, slice)`
+- [ ] 所有 `list.clearAndFree()` 改为 `list.clearAndFree(allocator)`
+- [ ] 确认 `orderedRemove`、`swapRemove` 等不需要 allocator 的方法保持原样
+
+**常见错误提示：**
+- `error: struct 'array_list.Aligned(...)' has no member named 'init'` → 使用 `.{}` 初始化
+- `error: member function expected N argument(s), found M` → 检查是否缺少或多传了 allocator 参数
 
 ## 6. 文档注释
 - 示例可裁剪；避免泄露密钥、真实内部地址。
@@ -119,6 +206,10 @@
 - **模拟外部依赖**：网络请求、文件系统等外部依赖应提供 mock 实现。
 - **性能测试**：关键算法可添加基准测试，监控性能回归。
 
+### 10.3 多端调测
+- 如果存在要多端同时调测的话，比如服务端和客户端需要同时运行来测试，那么先启动服务端，再启动客户端。
+- 多端调测时要把服务端别起一个终端运行，避免运行新的命令时把服务端给关闭了。
+
 ## 11. Copilot 使用守则
 - 仅回答开发相关；非开发 → “我是编程助手”。
 - 输出前检索；禁止重复造轮子。
@@ -130,7 +221,8 @@
 - 进行循环、控制流结构调整时，若原代码含循环花括号（即便单语句体），须保留，不得擅自移除。
 - 修改或提交代码后，需自动在本地运行与改动相关的单元测试并确保通过；若无法定位相关测试，再运行最小必要集合或全部；若未找到任何测试，需在结果中明确说明且不自动新增测试项目。
 - 生成文档：未特别指明时，默认以 Markdown（.md）格式输出，并使用 UTF-8 编码。
-- 当出现新版本 Zig API 时，优先使用新 API，禁止调用已废弃或重命名的旧 API，且阅读和搜索最新源码来分析判断解决问题。
+- 当出现新版本 Zig API 时，优先使用新 API，禁止调用已废弃或重命名的旧 API，且阅读和搜索最新源码来分析判断解决问题
+- 当需求以及要执行的方案合理时，禁止拒绝执行需求或方案，也不可用简单的方案来拒绝复杂的需求或方案。
 
 ## 12. 变更与审核说明
 提交或答复需包含：
