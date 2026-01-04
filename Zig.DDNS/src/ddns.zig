@@ -280,56 +280,33 @@ fn fetchWorker(allocator: std.mem.Allocator, url: []const u8, result: *FetchResu
 
 fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     logger.debug("fetchPublicIPv4: 准备发起请求", .{});
-    // 使用 Zig 0.15.1+ 内置 HTTP 客户端获取公网 IP
-    var client = std.http.Client{ .allocator = allocator, .write_buffer_size = 64 * 1024 };
+    // 使用 Zig 0.15.2+ fetch API（已验证可用）
+    var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
 
-    logger.debug("fetchPublicIPv4: 解析 URI", .{});
-    const uri = try std.Uri.parse(url);
-
     logger.debug("POST {s} (form: from=hlktech-nuget)", .{url});
-    logger.debug("fetchPublicIPv4: 创建请求对象", .{});
 
     // 准备表单数据
     const form_data = "from=hlktech-nuget";
 
-    var req = try client.request(.POST, uri, .{
-        .extra_headers = &.{
-            .{ .name = "content-type", .value = "application/x-www-form-urlencoded" },
-        },
-    });
-    defer req.deinit();
+    // 使用 Allocating Writer 捕获响应体
+    var allocating_writer = std.Io.Writer.Allocating.init(allocator);
+    defer allocating_writer.deinit();
 
-    req.transfer_encoding = .{ .content_length = form_data.len };
-
-    // 在发送阶段增加带 URL 的错误日志
     logger.debug("fetchPublicIPv4: 发送请求...", .{});
-    var body_writer = req.sendBody(&.{}) catch |e| {
-        logger.err("POST {s} 失败: {s}", .{ url, @errorName(e) });
-        return e;
-    };
-
-    // 写入表单数据
-    body_writer.writer.writeAll(form_data) catch |e| {
-        logger.err("写入表单数据失败: {s}", .{@errorName(e)});
-        return e;
-    };
-
-    try body_writer.end();
-
-    logger.debug("fetchPublicIPv4: 接收响应头", .{});
-    var redirect_buffer: [1024]u8 = undefined;
-    var response = try req.receiveHead(&redirect_buffer);
+    _ = try client.fetch(.{
+        .location = .{ .url = url },
+        .method = .POST,
+        .payload = form_data,
+        .headers = .{
+            .content_type = .{ .override = "application/x-www-form-urlencoded" },
+        },
+        .response_writer = &allocating_writer.writer,
+    });
 
     logger.debug("fetchPublicIPv4: 读取响应体", .{});
-    // 使用 allocRemaining 无限制读取
-    // 内存安全由超时机制保证：30秒超时限制了最大数据量（约几十MB）
-    // 不需要额外的大小限制
-    const body = response.reader(&.{}).allocRemaining(allocator, .unlimited) catch |e| {
-        logger.err("读取响应失败: {s}", .{@errorName(e)});
-        return e;
-    };
-    defer allocator.free(body);
+    // 从 Allocating Writer 获取响应体
+    const body = allocating_writer.writer.buffer[0..allocating_writer.writer.end];
 
     // 打印是否检测到压缩（通过 gzip 魔数）
     const is_gzip = isGzipMagic(body);
@@ -355,6 +332,7 @@ fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
         // 使用通用 JSON 工具库提取 Type 为 IPv4 的 Ip 字段
         logger.debug("fetchPublicIPv4: 解析 JSON 提取 IP", .{});
         const ip_field = try json_utils.quickGetStringFromArray(allocator, body, .{
+            .array_key = "Data",
             .match_key = "Type",
             .match_value = "IPv4",
             .target_key = "Ip",
