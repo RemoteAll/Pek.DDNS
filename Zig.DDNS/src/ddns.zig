@@ -173,28 +173,34 @@ pub fn run(config: Config) !void {
 }
 
 /// 网络操作超时时间（秒）
-/// 这是应用层超时，用于防止网络请求阻塞导致程序卡住
+/// 这是应用层超时，用于防止网络请求无响应导致程序卡住
 /// 当超时发生时，主线程会放弃等待并继续，工作线程会被 detach
-///
-/// 超时也间接限制了最大数据量：
-/// - 假设 1MB/s 网络速度，30秒最多接收 30MB
-/// - 因此不需要额外设置响应大小限制
-const NETWORK_TIMEOUT_SEC = 30;
+/// 注意：工作线程最终会因 HTTP 客户端内部超时或 TCP 超时而结束，不会真正泄漏
+const NETWORK_TIMEOUT_SEC = 5;
 
 /// 带超时保护的执行单次更新
 fn runOnce(allocator: std.mem.Allocator, config: Config) !void {
-    logger.debug("runOnce: 开始获取公网 IP (超时: {d}秒)", .{NETWORK_TIMEOUT_SEC});
+    logger.info("→ runOnce: 开始执行 (超时: {d}秒)", .{NETWORK_TIMEOUT_SEC});
 
     // 使用超时保护执行网络请求
-    const ip = try fetchPublicIPv4WithTimeout(allocator, config.ip_source_url, NETWORK_TIMEOUT_SEC);
+    logger.debug("→ runOnce: 调用 fetchPublicIPv4WithTimeout...", .{});
+    const ip = fetchPublicIPv4WithTimeout(allocator, config.ip_source_url, NETWORK_TIMEOUT_SEC) catch |err| {
+        logger.err("✗ runOnce: 获取 IP 失败 - {s}", .{@errorName(err)});
+        return err;
+    };
     defer allocator.free(ip);
-    logger.debug("runOnce: 获取到 IP = {s}", .{ip});
+    logger.info("✓ runOnce: 获取到 IP = {s}", .{ip});
 
-    logger.debug("runOnce: 开始更新 DNS 记录", .{});
+    logger.debug("→ runOnce: 开始更新 DNS 记录 (provider={s})", .{@tagName(config.provider)});
     switch (config.provider) {
-        .dnspod => try providers.dnspod_update(allocator, config, ip),
+        .dnspod => {
+            providers.dnspod_update(allocator, config, ip) catch |err| {
+                logger.err("✗ runOnce: DNS 更新失败 - {s}", .{@errorName(err)});
+                return err;
+            };
+        },
     }
-    logger.debug("runOnce: DNS 更新完成", .{});
+    logger.info("✓ runOnce: DNS 更新完成", .{});
 }
 
 /// 带超时的网络请求结果
@@ -222,21 +228,26 @@ fn fetchPublicIPv4WithTimeout(allocator: std.mem.Allocator, url: []const u8, tim
     while (true) {
         // 检查是否完成
         if (result.completed.load(.acquire)) {
+            logger.debug("[主线程] 检测到工作线程完成，准备 join", .{});
             thread.join();
-            _ = runtime_stats.active_threads.fetchSub(1, .monotonic);
+            // 注意：不在这里减少线程计数，worker 的 defer 会负责减少
+            logger.debug("[主线程] 线程已 join，检查结果", .{});
 
             result.mutex.lock();
             defer result.mutex.unlock();
 
             if (result.err) |err| {
+                logger.debug("[主线程] 工作线程返回错误: {s}", .{@errorName(err)});
                 if (result.data) |data| allocator.free(data);
                 return err;
             }
 
             if (result.data) |data| {
+                logger.debug("[主线程] 成功获取数据，长度: {d}", .{data.len});
                 return data;
             }
 
+            logger.err("[主线程] 工作线程既无数据也无错误！", .{});
             return error.UnknownError;
         }
 
@@ -260,22 +271,27 @@ fn fetchPublicIPv4WithTimeout(allocator: std.mem.Allocator, url: []const u8, tim
 
 /// 工作线程：执行实际的网络请求
 fn fetchWorker(allocator: std.mem.Allocator, url: []const u8, result: *FetchResult) void {
+    logger.debug("[工作线程] fetchWorker: 启动", .{});
     defer {
+        logger.debug("[工作线程] fetchWorker: 设置 completed=true", .{});
         result.completed.store(true, .release);
-        // 线程完成时减少计数（即使是被detach的线程）
-        _ = runtime_stats.active_threads.fetchSub(1, .monotonic);
+        const remaining = runtime_stats.active_threads.fetchSub(1, .monotonic);
+        logger.debug("[工作线程] fetchWorker: 结束 (剩余活动线程:{d})", .{remaining - 1});
     }
 
     const ip = fetchPublicIPv4(allocator, url) catch |err| {
+        logger.warn("[工作线程] fetchPublicIPv4 失败: {s}", .{@errorName(err)});
         result.mutex.lock();
         defer result.mutex.unlock();
         result.err = err;
         return;
     };
 
+    logger.debug("[工作线程] fetchWorker: 成功获取 IP，设置 result.data", .{});
     result.mutex.lock();
     defer result.mutex.unlock();
     result.data = ip;
+    logger.debug("[工作线程] fetchWorker: result.data 已设置", .{});
 }
 
 fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
@@ -361,18 +377,6 @@ fn runReadCmd(allocator: std.mem.Allocator, exe: []const u8, args: []const []con
     const out = try allocator.dupe(u8, trimmed);
     allocator.free(res.stdout);
     return out;
-}
-
-fn runPowerShell(allocator: std.mem.Allocator, command: []const u8) ![]u8 {
-    // 在命令前添加 $ProgressPreference='SilentlyContinue' 禁用进度条输出到 stderr
-    const silent_cmd = try std.fmt.allocPrint(allocator, "$ProgressPreference='SilentlyContinue'; {s}", .{command});
-    defer allocator.free(silent_cmd);
-
-    const args_pwsh = [_][]const u8{ "-NoProfile", "-Command", silent_cmd };
-    return runReadCmd(allocator, "pwsh", &args_pwsh) catch {
-        const args_ps = [_][]const u8{ "-NoProfile", "-Command", silent_cmd };
-        return runReadCmd(allocator, "powershell", &args_ps);
-    };
 }
 
 const providers = struct {
@@ -569,7 +573,7 @@ fn httpPostFormWithTimeout(allocator: std.mem.Allocator, url: []const u8, body: 
     while (true) {
         if (result.completed.load(.acquire)) {
             thread.join();
-            _ = runtime_stats.active_threads.fetchSub(1, .monotonic);
+            // 注意：不在这里减少线程计数，postWorker 的 defer 会负责减少
 
             result.mutex.lock();
             defer result.mutex.unlock();
@@ -618,94 +622,38 @@ fn postWorker(allocator: std.mem.Allocator, url: []const u8, body: []const u8, r
 }
 
 fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8) ![]u8 {
-    // 使用 Zig 0.15.2+ 低层 HTTP 客户端 POST 表单（稳定路径）
-    logger.debug("httpPostForm: 使用低层 request 发送 POST", .{});
-    var client = std.http.Client{ .allocator = allocator, .write_buffer_size = 64 * 1024 };
+    // 使用 Zig 0.15.2+ fetch API POST 表单（稳定路径）
+    logger.debug("httpPostForm: 使用 fetch API 发送 POST", .{});
+    logger.debug("POST {s}", .{url});
+
+    var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
 
-    logger.debug("httpPostForm: 解析 URI - {s}", .{url});
-    const uri = try std.Uri.parse(url);
+    // 使用 Allocating Writer 捕获响应
+    var allocating_writer = std.Io.Writer.Allocating.init(allocator);
+    defer allocating_writer.deinit();
 
-    logger.debug("httpPostForm: 创建 POST 请求", .{});
-    logger.debug("POST {s}", .{url});
-    // 创建请求，添加完整的 HTTP 头（模拟标准浏览器/工具行为）
-    var req = try client.request(.POST, uri, .{
-        .extra_headers = &.{
-            .{ .name = "content-type", .value = "application/x-www-form-urlencoded" },
-            .{ .name = "user-agent", .value = "Zig-DDNS/1.0" },
-            .{ .name = "accept", .value = "*/*" },
-            .{ .name = "accept-encoding", .value = "gzip, deflate" },
-            .{ .name = "connection", .value = "close" },
+    logger.debug("httpPostForm: 发送请求...", .{});
+    _ = try client.fetch(.{
+        .location = .{ .url = url },
+        .method = .POST,
+        .payload = body,
+        .headers = .{
+            .content_type = .{ .override = "application/x-www-form-urlencoded" },
+            .user_agent = .{ .override = "Zig-DDNS/1.0" },
         },
+        .response_writer = &allocating_writer.writer,
     });
-    defer req.deinit();
 
-    logger.debug("httpPostForm: 设置请求体长度 {d} 字节", .{body.len});
-    // 设置请求体长度
-    req.transfer_encoding = .{ .content_length = body.len };
-
-    logger.debug("httpPostForm: 发送请求体", .{});
-    // 发送请求体
-    var body_writer = req.sendBody(&.{}) catch |e| {
-        logger.err("POST {s} 建立连接/发送失败: {s}", .{ url, @errorName(e) });
-        return e;
-    };
-    body_writer.writer.writeAll(body) catch |e| {
-        logger.err("POST {s} 写入请求体失败: {s}", .{ url, @errorName(e) });
-        return e;
-    };
-    body_writer.end() catch |e| {
-        logger.err("POST {s} 结束请求体失败: {s}", .{ url, @errorName(e) });
-        return e;
-    };
-
-    logger.debug("httpPostForm: 等待接收响应头", .{});
-    // 接收响应
-    var redirect_buffer: [1024]u8 = undefined;
-    var response = req.receiveHead(&redirect_buffer) catch |err| {
-        logger.err("httpPostForm: 接收响应头失败 - {any} - url={s}", .{ err, url });
-        logger.warn("这通常意味着服务器在 HTTP 层之前就关闭了连接", .{});
-        logger.warn("可能原因:", .{});
-        logger.warn("  1) TLS 握手失败（证书问题）", .{});
-        logger.warn("  2) 服务器检测到无效的认证信息直接断开", .{});
-        logger.warn("  3) 请求格式不符合服务器要求", .{});
-        logger.warn("  4) 网络层面的连接问题", .{});
-        if (err == error.HttpConnectionClosing) {
-            logger.info("httpPostForm Fallback: 尝试使用 PowerShell Invoke-WebRequest 执行 POST", .{});
-            const escaped_body = try escapeForPSSingleQuoted(allocator, body);
-            defer allocator.free(escaped_body);
-            const ps_cmd = try std.fmt.allocPrint(
-                allocator,
-                "Invoke-WebRequest -Method POST -Uri '{s}' -Body '{s}' -ContentType 'application/x-www-form-urlencoded' -UserAgent 'Zig-DDNS/1.0' | Select-Object -ExpandProperty Content",
-                .{ url, escaped_body },
-            );
-            defer allocator.free(ps_cmd);
-            const ps_out = try runPowerShell(allocator, ps_cmd);
-            return ps_out;
-        }
-        return err;
-    };
-
-    // 能走到这里说明成功接收到响应头
-    logger.debug("httpPostForm: 响应接收成功", .{});
     logger.debug("httpPostForm: 读取响应体", .{});
-    // 使用 allocRemaining 无限制读取
-    // 内存安全由超时机制保证：30秒超时限制了最大数据量
-    const resp_buf = response.reader(&.{}).allocRemaining(allocator, .unlimited) catch |e| {
-        logger.err("读取 POST 响应失败: {s}", .{@errorName(e)});
-        return e;
-    };
-    defer allocator.free(resp_buf);
+    const resp_buf = allocating_writer.writer.buffer[0..allocating_writer.writer.end];
 
     logger.debug("post encoding gzip_magic={any}", .{isGzipMagic(resp_buf)});
     if (isGzipMagic(resp_buf)) {
         const unzipped = try gzipDecompress(allocator, resp_buf);
-        // 返回前复制一份，保证释放本地缓冲不会影响调用方
-        const out = try allocator.dupe(u8, unzipped);
-        allocator.free(unzipped);
-        return out;
+        return unzipped;
     }
-    // 返回前复制一份，保证释放本地缓冲不会影响调用方
+    // 复制响应数据供调用方使用
     const out = try allocator.dupe(u8, resp_buf);
     return out;
 }
@@ -781,22 +729,6 @@ fn hexVal(c: u8) u21 {
 // isGzipMagic 已在上文定义，这里不重复定义
 fn isGzipMagic(buf: []const u8) bool {
     return buf.len >= 2 and buf[0] == 0x1F and buf[1] == 0x8B;
-}
-
-// 将字符串转换为 PowerShell 单引号字面量安全形式：将 ' 替换为 ''
-fn escapeForPSSingleQuoted(allocator: std.mem.Allocator, src: []const u8) ![]u8 {
-    if (std.mem.indexOfScalar(u8, src, '\'') == null) return allocator.dupe(u8, src);
-    var list: std.ArrayList(u8) = .empty;
-    defer list.deinit(allocator);
-    try list.ensureTotalCapacityPrecise(allocator, src.len + 8);
-    for (src) |c| {
-        if (c == '\'') {
-            try list.appendSlice(allocator, "''");
-        } else {
-            try list.append(allocator, c);
-        }
-    }
-    return list.toOwnedSlice(allocator);
 }
 
 // x-www-form-urlencoded 编码（最小实现）
