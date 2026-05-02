@@ -36,6 +36,33 @@ fn configError() noreturn {
     std.process.exit(1);
 }
 
+/// 将 sub_domain 字符串按逗号或分号分隔为子域名列表
+/// 支持格式: "www" / "www,@" / "www;home" / "www,@,home"
+/// 分隔后去除首尾空白，跳过空段
+fn splitSubDomains(allocator: std.mem.Allocator, input: []const u8) ![][]const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    defer list.deinit(allocator);
+
+    var start: usize = 0;
+    for (input, 0..) |ch, i| {
+        if (ch == ',' or ch == ';') {
+            // 提取当前段，去除首尾空白
+            const segment = std.mem.trim(u8, input[start..i], " \t");
+            if (segment.len > 0) {
+                try list.append(allocator, segment);
+            }
+            start = i + 1;
+        }
+    }
+    // 处理最后一段
+    const last = std.mem.trim(u8, input[start..], " \t");
+    if (last.len > 0) {
+        try list.append(allocator, last);
+    }
+
+    return list.toOwnedSlice(allocator);
+}
+
 pub fn main() !void {
     // Windows 控制台中文/颜色显示：设置 UTF-8 编码并启用虚拟终端处理（ANSI 序列）
     if (@import("builtin").os.tag == .windows) {
@@ -133,15 +160,21 @@ pub fn main() !void {
         }
         break :blk v.string;
     };
-    const sub_domain = blk: {
+    // 解析 sub_domain 字段，支持逗号或分号分隔的多个子域名
+    // 例如 "www" / "www,@,home" / "www;home"
+    const sub_domains = blk: {
         const maybe = obj.get("sub_domain");
-        if (maybe == null) break :blk "@";
-        const v = maybe.?;
-        if (v != .string) {
-            logger.err("sub_domain 字段类型应为字符串", .{});
-            return;
-        }
-        break :blk v.string;
+        const raw: []const u8 = if (maybe) |v| blk2: {
+            if (v != .string) {
+                logger.err("sub_domain 字段类型应为字符串", .{});
+                return;
+            }
+            break :blk2 v.string;
+        } else "@"; // 默认子域名为根域名
+        break :blk splitSubDomains(allocator, raw) catch |e| {
+            logger.err("解析 sub_domain 字段失败: {s}", .{@errorName(e)});
+            configError();
+        };
     };
     const record_type = blk: {
         const maybe = obj.get("record_type");
@@ -230,7 +263,7 @@ pub fn main() !void {
     const cfg = Zig_DDNS.Config{
         .provider = provider,
         .domain = domain,
-        .sub_domain = sub_domain,
+        .sub_domains = sub_domains,
         .record_type = record_type,
         .interval_sec = interval_sec,
         .dnspod = Zig_DDNS.ddns.DnsPodConfig{ .token_id = token_id, .token = token, .line = line, .ttl = ttl },
@@ -257,8 +290,10 @@ pub fn main() !void {
                 std.debug.print("\n[建议措施]\n", .{});
                 std.debug.print("  • 检查网络连接和防火墙设置\n", .{});
                 std.debug.print("  • 尝试使用其他网络环境\n", .{});
-                std.debug.print("  • 如果问题持续，这可能是 Zig 0.15.2 std.http.Client 的已知兼容性问题\n", .{});
                 std.process.exit(1);
+            },
+            error.PartialUpdateFailure => {
+                // 部分子域名更新失败，已在循环中记录，正常退出
             },
             else => {
                 // 其他错误继续抛出，显示堆栈跟踪以便调试

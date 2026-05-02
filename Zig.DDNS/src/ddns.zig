@@ -11,7 +11,7 @@ pub const Config = struct {
     provider: Provider,
     // 解析记录基本信息
     domain: []const u8, // 主域名，如 example.com
-    sub_domain: []const u8, // 子域名/主机记录，如 @、www、home
+    sub_domains: [][]const u8, // 子域名/主机记录列表，支持逗号或分号分隔，如 "www,@,home"
     record_type: []const u8 = "A", // 默认为 A 记录
     // 轮询/执行模式
     interval_sec: u32 = 60, // 轮询更新周期，0 表示只执行一次
@@ -139,6 +139,10 @@ pub fn run(config: Config) !void {
                     logger.err("配置错误，无法继续运行", .{});
                     return err;
                 },
+                error.PartialUpdateFailure => {
+                    // 部分子域名更新失败，记录但继续运行
+                    logger.warn("部分子域名更新失败 (连续错误:{d})", .{consecutive});
+                },
                 else => {
                     // 其他未知错误，记录详情但继续运行
                     logger.err("执行失败: {s} (连续错误:{d})", .{ @errorName(err), consecutive });
@@ -195,8 +199,13 @@ fn runOnce(allocator: std.mem.Allocator, config: Config) !void {
     switch (config.provider) {
         .dnspod => {
             providers.dnspod_update(allocator, config, ip) catch |err| {
-                logger.err("✗ runOnce: DNS 更新失败 - {s}", .{@errorName(err)});
-                return err;
+                if (err == error.PartialUpdateFailure) {
+                    // 部分子域名更新失败，记录警告但不中断
+                    logger.warn("⚠ runOnce: 部分子域名更新失败", .{});
+                } else {
+                    logger.err("✗ runOnce: DNS 更新失败 - {s}", .{@errorName(err)});
+                    return err;
+                }
             };
         },
     }
@@ -380,6 +389,8 @@ fn runReadCmd(allocator: std.mem.Allocator, exe: []const u8, args: []const []con
 }
 
 const providers = struct {
+    /// DNSPod 更新逻辑：遍历配置中的所有子域名，逐一检查并更新 DNS 记录
+    /// 每个子域名独立处理，单个失败不影响其他子域名
     pub fn dnspod_update(allocator: std.mem.Allocator, config: Config, ip: []const u8) !void {
         if (config.dnspod == null) return error.MissingProviderConfig;
         const dp = config.dnspod.?;
@@ -399,13 +410,32 @@ const providers = struct {
         // 2) 若不存在则创建（Record.Create）
         // 3) 若存在且值不同，则更新（Record.Modify）
 
-        const record = try dnspod_find_record(allocator, dp, config.domain, config.sub_domain, config.record_type);
+        // 遍历所有子域名，逐一更新
+        var had_error = false;
+        for (config.sub_domains, 0..) |sub_domain, i| {
+            if (config.sub_domains.len > 1) {
+                logger.info("dnspod: 处理子域名 [{d}/{d}]: {s}.{s}", .{ i + 1, config.sub_domains.len, sub_domain, config.domain });
+            }
+
+            dnspod_update_single(allocator, dp, config.domain, sub_domain, config, ip) catch |err| {
+                logger.err("dnspod: 更新 {s}.{s} 失败 - {s}", .{ sub_domain, config.domain, @errorName(err) });
+                had_error = true;
+            };
+        }
+
+        if (had_error) return error.PartialUpdateFailure;
+    }
+
+    /// 单个子域名的 DNS 记录更新：查找 → 创建/修改
+    fn dnspod_update_single(allocator: std.mem.Allocator, dp: DnsPodConfig, domain: []const u8, sub_domain: []const u8, config: Config, ip: []const u8) !void {
+        const record = try dnspod_find_record(allocator, dp, domain, sub_domain, config.record_type);
         if (record == null) {
-            logger.info("dnspod: 未找到现有记录，将创建 {s}.{s} -> {s} (TTL={d})", .{ config.sub_domain, config.domain, ip, dp.ttl });
-            try dnspod_create_record(allocator, dp, config.domain, config.sub_domain, config.record_type, ip, config);
-            logger.info("dnspod: 已创建记录 {s}.{s} -> {s} (TTL={d})", .{ config.sub_domain, config.domain, ip, dp.ttl });
+            logger.info("dnspod: 未找到现有记录，将创建 {s}.{s} -> {s} (TTL={d})", .{ sub_domain, domain, ip, dp.ttl });
+            try dnspod_create_record(allocator, dp, domain, sub_domain, config.record_type, ip, config);
+            logger.info("dnspod: 已创建记录 {s}.{s} -> {s} (TTL={d})", .{ sub_domain, domain, ip, dp.ttl });
         } else {
             const r = record.?;
+            // 检查 IP 和 TTL 是否发生变化
             const ip_changed = !std.mem.eql(u8, r.value, ip);
             const ttl_changed = r.ttl != dp.ttl;
             const need_update = ip_changed or ttl_changed;
@@ -418,10 +448,10 @@ const providers = struct {
                 } else {
                     logger.info("dnspod: 检测到 TTL 变化 - {d} -> {d} → 将更新", .{ r.ttl, dp.ttl });
                 }
-                try dnspod_modify_record(allocator, dp, r.id, config.domain, config.sub_domain, config.record_type, ip, config);
-                logger.info("dnspod: 已更新记录 {s}.{s} -> {s} (TTL={d})", .{ config.sub_domain, config.domain, ip, dp.ttl });
+                try dnspod_modify_record(allocator, dp, r.id, domain, sub_domain, config.record_type, ip, config);
+                logger.info("dnspod: 已更新记录 {s}.{s} -> {s} (TTL={d})", .{ sub_domain, domain, ip, dp.ttl });
             } else {
-                logger.info("dnspod: {s}.{s} 无变化 (ip={s}, ttl={d})", .{ config.sub_domain, config.domain, ip, r.ttl });
+                logger.info("dnspod: {s}.{s} 无变化 (ip={s}, ttl={d})", .{ sub_domain, domain, ip, r.ttl });
             }
             allocator.free(r.id);
             allocator.free(r.value);
