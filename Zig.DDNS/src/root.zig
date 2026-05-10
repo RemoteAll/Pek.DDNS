@@ -9,6 +9,10 @@ pub const logger = @import("logger.zig");
 pub const Config = ddns.Config;
 pub const Provider = ddns.Provider;
 
+pub fn configureIo(io: std.Io) void {
+    ddns.configureIo(io);
+}
+
 /// 运行一次或循环运行 DDNS
 pub fn run(config: Config) !void {
     try ddns.run(config);
