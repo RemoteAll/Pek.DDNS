@@ -23,6 +23,8 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("timeout={d}s\n\n", .{timeout_sec});
 
     try runProbe(allocator, "main-init-io", io);
+    std.debug.print("\n", .{});
+    try runProbe(allocator, "global-single-threaded", std.Io.Threaded.global_single_threaded.io());
 }
 
 fn runProbe(allocator: std.mem.Allocator, label: []const u8, io: std.Io) !void {
