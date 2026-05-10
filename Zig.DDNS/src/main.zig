@@ -247,8 +247,6 @@ pub fn main(init: std.process.Init) !void {
         .ip_source_url = ip_source_url,
     };
 
-    Zig_DDNS.configureIo(io);
-
     // 捕获特定错误，友好处理（不显示堆栈跟踪）
     Zig_DDNS.run(cfg) catch |err| {
         switch (err) {

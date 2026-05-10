@@ -105,24 +105,11 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    const probe_exe = b.addExecutable(.{
-        .name = "Zig_DDNS_NetProbe",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/net_probe.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "zzig", .module = zzig.module("zzig") },
-            },
-        }),
-    });
-
     // This declares intent for the executable to be installed into the
     // install prefix when running `zig build` (i.e. when executing the default
     // step). By default the install prefix is `zig-out/` but can be overridden
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
-    b.installArtifact(probe_exe);
 
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
@@ -148,15 +135,6 @@ pub fn build(b: *std.Build) void {
     // command itself, like this: `zig build run -- arg1 arg2 etc`
     if (b.args) |args| {
         run_cmd.addArgs(args);
-    }
-
-    const probe_step = b.step("probe", "Run the network probe");
-    const probe_cmd = b.addRunArtifact(probe_exe);
-    probe_step.dependOn(&probe_cmd.step);
-    probe_cmd.step.dependOn(b.getInstallStep());
-
-    if (b.args) |args| {
-        probe_cmd.addArgs(args);
     }
 
     // Creates an executable that will run `test` blocks from the provided module.

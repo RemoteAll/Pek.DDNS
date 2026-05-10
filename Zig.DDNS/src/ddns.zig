@@ -44,14 +44,9 @@ const RuntimeStats = struct {
 };
 
 var runtime_stats = RuntimeStats{};
-var app_io: ?std.Io = null;
-
-pub fn configureIo(io: std.Io) void {
-    app_io = io;
-}
 
 fn currentIo() std.Io {
-    return app_io orelse std.Io.Threaded.global_single_threaded.io();
+    return std.Io.Threaded.global_single_threaded.io();
 }
 
 pub fn run(config: Config) !void {
