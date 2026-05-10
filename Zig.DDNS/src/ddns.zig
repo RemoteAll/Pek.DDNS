@@ -1,6 +1,4 @@
 const std = @import("std");
-const zzig = @import("zzig");
-const compat = zzig.compat;
 const json_utils = @import("json_utils.zig");
 const logger = @import("logger.zig");
 
@@ -40,29 +38,25 @@ const RuntimeStats = struct {
     consecutive_errors: u32 = 0,
     active_threads: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     last_success_time: i64 = 0,
-    mutex: zzig.compat.Mutex = .{},
+    mutex: std.Thread.Mutex = .{},
 };
 
 var runtime_stats = RuntimeStats{};
 
-fn currentIo() std.Io {
-    return std.Io.Threaded.global_single_threaded.io();
-}
-
 pub fn run(config: Config) !void {
-    var gpa = std.heap.DebugAllocator(.{}).init;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     logger.info("🚀 程序启动 - 更新周期: {d}秒", .{config.interval_sec});
-    runtime_stats.last_success_time = compat.timestamp();
+    runtime_stats.last_success_time = std.time.timestamp();
 
     if (config.interval_sec == 0) {
         try runOnce(allocator, config);
         return;
     }
 
-    var last_heartbeat: i64 = compat.timestamp();
+    var last_heartbeat: i64 = std.time.timestamp();
     const heartbeat_interval: i64 = 300; // 5分钟输出一次心跳
 
     while (true) {
@@ -72,7 +66,7 @@ pub fn run(config: Config) !void {
         runtime_stats.mutex.unlock();
 
         // 定期输出心跳日志
-        const now = compat.timestamp();
+        const now = std.time.timestamp();
         if ((now - last_heartbeat) >= heartbeat_interval) {
             runtime_stats.mutex.lock();
             const stats = .{
@@ -98,7 +92,7 @@ pub fn run(config: Config) !void {
 
         logger.debug("===== 周期 #{d} =====", .{cycle_num});
         logger.debug("===== 周期 #{d} =====", .{cycle_num});
-        const start_time = compat.nanoTimestamp();
+        const start_time = std.time.nanoTimestamp();
 
         // 捕获单次执行的错误，记录日志但不退出循环
         const run_result = runOnce(allocator, config);
@@ -107,7 +101,7 @@ pub fn run(config: Config) !void {
             runtime_stats.mutex.lock();
             runtime_stats.success_count += 1;
             runtime_stats.consecutive_errors = 0;
-            runtime_stats.last_success_time = compat.timestamp();
+            runtime_stats.last_success_time = std.time.timestamp();
             runtime_stats.mutex.unlock();
             logger.debug("✓ 更新成功", .{});
         } else |err| {
@@ -158,7 +152,7 @@ pub fn run(config: Config) !void {
         }
 
         // 计算执行耗时并动态调整睡眠时间，确保固定周期
-        const end_time = compat.nanoTimestamp();
+        const end_time = std.time.nanoTimestamp();
         const elapsed_ns = end_time - start_time;
         const interval_ns = @as(i64, config.interval_sec) * std.time.ns_per_s;
 
@@ -170,7 +164,7 @@ pub fn run(config: Config) !void {
                     @divFloor(sleep_ns, std.time.ns_per_s),
                     @divFloor(elapsed_ns, std.time.ns_per_ms),
                 });
-                compat.sleep(@as(u64, @intCast(sleep_ns)));
+                std.Thread.sleep(@as(u64, @intCast(sleep_ns)));
             }
         } else {
             // 执行时间超过间隔，记录警告但继续运行
@@ -223,7 +217,7 @@ const FetchResult = struct {
     data: ?[]u8 = null,
     err: ?anyerror = null,
     completed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    mutex: zzig.compat.Mutex = .{},
+    mutex: std.Thread.Mutex = .{},
 };
 
 /// 带超时保护的获取公网 IP
@@ -238,7 +232,7 @@ fn fetchPublicIPv4WithTimeout(allocator: std.mem.Allocator, url: []const u8, tim
 
     // 主线程等待超时
     const timeout_ns = @as(u64, timeout_sec) * std.time.ns_per_s;
-    const start_time = compat.nanoTimestamp();
+    const start_time = std.time.nanoTimestamp();
 
     while (true) {
         // 检查是否完成
@@ -267,7 +261,7 @@ fn fetchPublicIPv4WithTimeout(allocator: std.mem.Allocator, url: []const u8, tim
         }
 
         // 检查是否超时
-        const elapsed = compat.nanoTimestamp() - start_time;
+        const elapsed = std.time.nanoTimestamp() - start_time;
         if (elapsed >= timeout_ns) {
             const active = runtime_stats.active_threads.load(.monotonic);
             logger.warn("⏱️ 网络请求超时 ({d}秒)，放弃等待 [活动线程:{d}]", .{ timeout_sec, active });
@@ -280,7 +274,7 @@ fn fetchPublicIPv4WithTimeout(allocator: std.mem.Allocator, url: []const u8, tim
         }
 
         // 短暂睡眠避免忙等待
-        compat.sleep(100 * std.time.ns_per_ms);
+        std.Thread.sleep(100 * std.time.ns_per_ms);
     }
 }
 
@@ -312,7 +306,7 @@ fn fetchWorker(allocator: std.mem.Allocator, url: []const u8, result: *FetchResu
 fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     logger.debug("fetchPublicIPv4: 准备发起请求", .{});
     // 使用 Zig 0.15.2+ fetch API（已验证可用）
-    var client = std.http.Client{ .allocator = allocator, .io = currentIo() };
+    var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
 
     logger.debug("POST {s} (form: from=hlktech-nuget)", .{url});
@@ -593,7 +587,7 @@ const PostResult = struct {
     data: ?[]u8 = null,
     err: ?anyerror = null,
     completed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    mutex: zzig.compat.Mutex = .{},
+    mutex: std.Thread.Mutex = .{},
 };
 
 /// 带超时保护的 POST 请求
@@ -604,7 +598,7 @@ fn httpPostFormWithTimeout(allocator: std.mem.Allocator, url: []const u8, body: 
     const thread = try std.Thread.spawn(.{}, postWorker, .{ allocator, url, body, &result });
 
     const timeout_ns = @as(u64, timeout_sec) * std.time.ns_per_s;
-    const start_time = compat.nanoTimestamp();
+    const start_time = std.time.nanoTimestamp();
 
     while (true) {
         if (result.completed.load(.acquire)) {
@@ -626,7 +620,7 @@ fn httpPostFormWithTimeout(allocator: std.mem.Allocator, url: []const u8, body: 
             return error.UnknownError;
         }
 
-        const elapsed = compat.nanoTimestamp() - start_time;
+        const elapsed = std.time.nanoTimestamp() - start_time;
         if (elapsed >= timeout_ns) {
             const active = runtime_stats.active_threads.load(.monotonic);
             logger.warn("⏱️ POST 请求超时 ({d}秒)，放弃等待 [活动线程:{d}] - {s}", .{ timeout_sec, active, url });
@@ -634,7 +628,7 @@ fn httpPostFormWithTimeout(allocator: std.mem.Allocator, url: []const u8, body: 
             return error.RequestTimeout;
         }
 
-        compat.sleep(100 * std.time.ns_per_ms);
+        std.Thread.sleep(100 * std.time.ns_per_ms);
     }
 }
 
@@ -662,7 +656,7 @@ fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
     logger.debug("httpPostForm: 使用 fetch API 发送 POST", .{});
     logger.debug("POST {s}", .{url});
 
-    var client = std.http.Client{ .allocator = allocator, .io = currentIo() };
+    var client = std.http.Client{ .allocator = allocator };
     defer client.deinit();
 
     // 使用 Allocating Writer 捕获响应

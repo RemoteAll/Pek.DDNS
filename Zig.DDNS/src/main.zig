@@ -2,13 +2,32 @@
 // 仅在 Windows 下生效，其他平台无影响
 const std = @import("std");
 const Zig_DDNS = @import("Zig_DDNS");
-const zzig = Zig_DDNS.zzig;
 const logger = Zig_DDNS.logger;
+const builtin = @import("builtin");
+
+// Windows API 函数声明（Zig 0.15.2+ 会自动使用正确的调用约定）
+extern "kernel32" fn SetConsoleOutputCP(wCodePageID: u32) c_int;
+extern "kernel32" fn SetConsoleCP(wCodePageID: u32) c_int;
 
 /// 跨平台等待用户按键，避免窗口一闪而过
 fn waitForKeyPress() void {
+    logger.warn("", .{});
     logger.info("按任意键退出...", .{});
-    _ = zzig.Input.readKey() catch {};
+
+    if (builtin.os.tag == .windows) {
+        // Windows: 使用 Windows API ReadFile
+        const w = std.os.windows;
+        const stdin_handle = w.kernel32.GetStdHandle(w.STD_INPUT_HANDLE);
+        if (stdin_handle == null or stdin_handle == w.INVALID_HANDLE_VALUE) return;
+
+        var buf: [1]u8 = undefined;
+        var bytes_read: w.DWORD = 0;
+        _ = w.kernel32.ReadFile(stdin_handle.?, &buf, 1, &bytes_read, null);
+    } else {
+        // Linux/macOS: 使用 POSIX read
+        var buf: [1]u8 = undefined;
+        _ = std.posix.read(std.posix.STDIN_FILENO, &buf) catch {};
+    }
 }
 
 /// 配置错误退出：显示错误信息后等待用户按键（跨平台）
@@ -44,19 +63,31 @@ fn splitSubDomains(allocator: std.mem.Allocator, input: []const u8) ![][]const u
     return list.toOwnedSlice(allocator);
 }
 
-pub fn main(init: std.process.Init) !void {
-    const console_result = zzig.Console.init(.{});
-    defer zzig.Console.deinit(console_result);
-    logger.enableThreadSafe();
+pub fn main() !void {
+    // Windows 控制台中文/颜色显示：设置 UTF-8 编码并启用虚拟终端处理（ANSI 序列）
+    if (@import("builtin").os.tag == .windows) {
+        const w = std.os.windows;
 
+        // 设置控制台输入输出为 UTF-8 (代码页 65001)
+        _ = SetConsoleOutputCP(65001);
+        _ = SetConsoleCP(65001);
+
+        // 启用虚拟终端处理（支持 ANSI 转义序列）
+        const h = w.kernel32.GetStdHandle(w.STD_OUTPUT_HANDLE);
+        if (h != null and h != w.INVALID_HANDLE_VALUE) {
+            var m: w.DWORD = 0;
+            if (w.kernel32.GetConsoleMode(h.?, &m) != 0) _ = w.kernel32.SetConsoleMode(h.?, m | 0x0004);
+        }
+    }
     // 优先使用配置文件 config.json；若不存在则生成模板并提示填充，再退出。
-    const allocator = init.gpa;
-    const io = init.io;
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
 
     const config_path = "config.json";
-    const cwd = std.Io.Dir.cwd();
+    var cwd = std.fs.cwd();
     var file_exists: bool = true;
-    _ = cwd.statFile(io, config_path, .{}) catch |e| switch (e) {
+    _ = cwd.statFile(config_path) catch |e| switch (e) {
         error.FileNotFound => file_exists = false,
         else => return e,
     };
@@ -77,25 +108,17 @@ pub fn main(init: std.process.Init) !void {
             "  },\n" ++
             "  \"ip_source_url\": \"https://t.sc8.fun/api/client-ip\"\n" ++
             "}\n";
-        var f = try cwd.createFile(io, config_path, .{ .read = true, .truncate = true });
-        defer f.close(io);
-
-        var writer_buffer: [4096]u8 = undefined;
-        var writer = std.Io.File.Writer.init(f, io, &writer_buffer);
-        try writer.interface.writeAll(tpl);
-        try writer.flush();
+        var f = try cwd.createFile(config_path, .{ .read = true, .truncate = true });
+        defer f.close();
+        try f.writeAll(tpl);
         logger.warn("已生成配置文件 {s}，请填入实际值后再运行。", .{config_path});
         configError();
     }
 
     // 读取并解析 JSON 配置
-    var f2 = try cwd.openFile(io, config_path, .{});
-    defer f2.close(io);
-
-    const file_stat = try f2.stat(io);
-    var reader_buffer: [4096]u8 = undefined;
-    var reader = std.Io.File.Reader.init(f2, io, &reader_buffer);
-    const data = try reader.interface.readAlloc(allocator, @intCast(file_stat.size));
+    var f2 = try cwd.openFile(config_path, .{});
+    defer f2.close();
+    const data = try f2.readToEndAlloc(allocator, std.math.maxInt(usize));
     defer allocator.free(data);
 
     const json = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch |e| {
@@ -290,13 +313,10 @@ test "simple test" {
 
 test "fuzz example" {
     const Context = struct {
-        fn testOne(context: @This(), smith: *std.testing.Smith) anyerror!void {
+        fn testOne(context: @This(), input: []const u8) anyerror!void {
             _ = context;
-            var input: [32]u8 = undefined;
-            const len = @as(usize, smith.valueRangeAtMost(u8, 0, 32));
-            smith.bytes(input[0..len]);
             // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-            try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input[0..len]));
+            try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input));
         }
     };
     try std.testing.fuzz(Context{}, Context.testOne, .{});

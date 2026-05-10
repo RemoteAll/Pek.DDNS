@@ -1,18 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
-
-const min_zig_string = "0.16.0";
-
-comptime {
-    const min_zig = std.SemanticVersion.parse(min_zig_string) catch unreachable;
-    if (builtin.zig_version.order(min_zig) == .lt) {
-        const err_msg = std.fmt.comptimePrint(
-            "Zig.DDNS requires Zig v{f} or newer, but current Zig is v{f}",
-            .{ min_zig, builtin.zig_version },
-        );
-        @compileError(err_msg);
-    }
-}
 
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
@@ -35,11 +21,6 @@ pub fn build(b: *std.Build) void {
     // target and optimize options) will be listed when running `zig build --help`
     // in this directory.
 
-    const zzig = b.dependency("zzig", .{
-        .target = target,
-        .optimize = optimize,
-    });
-
     // This creates a module, which represents a collection of source files alongside
     // some compilation options, such as optimization mode and linked system libraries.
     // Zig modules are the preferred way of making Zig code available to consumers.
@@ -58,9 +39,6 @@ pub fn build(b: *std.Build) void {
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
-        .imports = &.{
-            .{ .name = "zzig", .module = zzig.module("zzig") },
-        },
     });
 
     // Here we define an executable. An executable needs to have a root module
