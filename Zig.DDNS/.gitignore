@@ -1,6 +1,8 @@
 # Zig 构建产物
 .zig-cache/
+zig-pkg/
 zig-out/
+zig-out-small/
 
 # 配置文件（包含敏感信息）
 config.json
