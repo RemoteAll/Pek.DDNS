@@ -278,13 +278,13 @@ fn fetchPublicIPv4(allocator: std.mem.Allocator, client: *std.http.Client, url: 
     const fetch_elapsed_ms = @divFloor(compat.nanoTimestamp() - fetch_start, std.time.ns_per_ms);
     logger.debug("fetchPublicIPv4: 请求完成，耗时 {d}ms，准备处理响应体", .{fetch_elapsed_ms});
     const body = response.body;
+    defer allocator.free(body);
 
     const is_gzip = zhttp.isGzipMagic(body);
     logger.debug("ip-source encoding gzip_magic={any}", .{is_gzip});
 
     if (is_gzip) {
         logger.debug("fetchPublicIPv4: 开始 gzip 解压", .{});
-        defer allocator.free(body);
         const unzipped = try zhttp.gzipDecompressAlloc(allocator, body);
         logger.debug("ip-source gunzip: {s}", .{unzipped});
         defer allocator.free(unzipped);
