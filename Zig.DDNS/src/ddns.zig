@@ -1,8 +1,7 @@
 const std = @import("std");
 const zzig = @import("zzig");
 const compat = zzig.compat;
-const zhttp = zzig.Http;
-const json_utils = @import("json_utils.zig");
+const zhttpenh = zzig.HttpEnhanced;
 const logger = @import("logger.zig");
 
 pub const Provider = enum {
@@ -231,83 +230,45 @@ fn fetchPublicIPv4WithTimeout(allocator: std.mem.Allocator, client: *std.http.Cl
 }
 
 fn fetchPublicIPv4WithRetry(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, timeout_sec: u32) ![]u8 {
-    var attempt: u32 = 1;
-
-    while (true) {
-        const ip = fetchPublicIPv4(allocator, client, url, timeout_sec) catch |err| {
-            if (!shouldRetryHttpPost(err, attempt)) return err;
-
-            logger.warn("fetchPublicIPv4: attempt={d}/{d} 失败 err={s}，{d}ms 后重试", .{
-                attempt,
-                HTTP_POST_MAX_ATTEMPTS,
-                @errorName(err),
-                HTTP_POST_RETRY_DELAY_MS,
-            });
-            compat.sleep(HTTP_POST_RETRY_DELAY_MS * std.time.ns_per_ms);
-            attempt += 1;
-            continue;
-        };
-
-        if (attempt > 1) {
-            logger.info("fetchPublicIPv4: attempt={d}/{d} 重试成功", .{ attempt, HTTP_POST_MAX_ATTEMPTS });
-        }
-        return ip;
-    }
+    return fetchPublicIPv4(allocator, client, url, timeout_sec);
 }
 
 fn fetchPublicIPv4(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, timeout_sec: u32) ![]u8 {
     logger.debug("fetchPublicIPv4: 准备发起请求", .{});
-
     logger.debug("POST {s} (form: from=hlktech-nuget)", .{url});
 
-    // 准备表单数据
-    const form_data = "from=hlktech-nuget";
-
-    logger.debug("fetchPublicIPv4: 发送请求...", .{});
-    const fetch_start = compat.nanoTimestamp();
-    const response = try zhttp.fetchBytesWithTimeout(allocator, client, .{
-        .url = url,
-        .method = .POST,
-        .payload = form_data,
-        .headers = .{
-            .content_type = .{ .override = "application/x-www-form-urlencoded" },
-        },
-    }, @as(u64, timeout_sec) * std.time.ms_per_s, NETWORK_POLL_INTERVAL_MS);
-    errdefer allocator.free(response.body);
-
-    const fetch_elapsed_ms = @divFloor(compat.nanoTimestamp() - fetch_start, std.time.ns_per_ms);
-    logger.debug("fetchPublicIPv4: 请求完成，耗时 {d}ms，准备处理响应体", .{fetch_elapsed_ms});
-    const body = response.body;
+    const body = try zhttpenh.fetchPublicIPv4WithRetry(allocator, client, url, .{
+        .max_attempts = HTTP_POST_MAX_ATTEMPTS,
+        .retry_delay_ms = HTTP_POST_RETRY_DELAY_MS,
+        .timeout_sec = timeout_sec,
+        .poll_interval_ms = NETWORK_POLL_INTERVAL_MS,
+    });
     defer allocator.free(body);
 
-    const is_gzip = zhttp.isGzipMagic(body);
-    logger.debug("ip-source encoding gzip_magic={any}", .{is_gzip});
-
-    if (is_gzip) {
-        logger.debug("fetchPublicIPv4: 开始 gzip 解压", .{});
-        const unzipped = try zhttp.gzipDecompressAlloc(allocator, body);
-        logger.debug("ip-source gunzip: {s}", .{unzipped});
-        defer allocator.free(unzipped);
-        logger.debug("fetchPublicIPv4: 解析 JSON 提取 IP", .{});
-        const ip_field = try json_utils.quickGetStringFromArray(allocator, unzipped, .{
-            .match_key = "Type",
-            .match_value = "IPv4",
-            .target_key = "Ip",
-        });
-        logger.debug("fetchPublicIPv4: 完成，IP = {s}", .{ip_field});
-        return ip_field;
-    }
-
     logger.debug("ip-source raw: {s}", .{body});
+    return extractPublicIPv4(allocator, body);
+}
+
+fn extractPublicIPv4(allocator: std.mem.Allocator, body: []const u8) ![]u8 {
     logger.debug("fetchPublicIPv4: 解析 JSON 提取 IP", .{});
-    const ip_field = try json_utils.quickGetStringFromArray(allocator, body, .{
+
+    return zzig.json.quickGetStringFromArray(allocator, body, .{
         .array_key = "Data",
         .match_key = "Type",
         .match_value = "IPv4",
         .target_key = "Ip",
-    });
-    logger.debug("fetchPublicIPv4: 完成，IP = {s}", .{ip_field});
-    return ip_field;
+    }) catch |err| switch (err) {
+        error.KeyNotFound, error.ElementNotFound, error.TypeMismatch => blk: {
+            const ip_field = try zzig.json.quickGetStringFromArray(allocator, body, .{
+                .match_key = "Type",
+                .match_value = "IPv4",
+                .target_key = "Ip",
+            });
+            logger.debug("fetchPublicIPv4: 完成，IP = {s}", .{ip_field});
+            break :blk ip_field;
+        },
+        else => err,
+    };
 }
 
 fn runReadCmd(allocator: std.mem.Allocator, exe: []const u8, args: []const []const u8) ![]u8 {
@@ -531,64 +492,21 @@ fn httpPostFormWithTimeout(allocator: std.mem.Allocator, client: *std.http.Clien
 }
 
 fn httpPostFormWithRetry(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, body: []const u8, timeout_sec: u32) ![]u8 {
-    var attempt: u32 = 1;
+    logger.debug("httpPostForm: 使用 ZZig.HttpEnhanced 发送 POST", .{});
+    logger.debug("POST {s}", .{url});
 
-    while (true) {
-        const data = httpPostForm(allocator, client, url, body, timeout_sec) catch |err| {
-            if (!shouldRetryHttpPost(err, attempt)) return err;
-
-            logger.warn("httpPostForm: attempt={d}/{d} 失败 err={s}，{d}ms 后重试", .{
-                attempt,
-                HTTP_POST_MAX_ATTEMPTS,
-                @errorName(err),
-                HTTP_POST_RETRY_DELAY_MS,
-            });
-            compat.sleep(HTTP_POST_RETRY_DELAY_MS * std.time.ns_per_ms);
-            attempt += 1;
-            continue;
-        };
-
-        if (attempt > 1) {
-            logger.info("httpPostForm: attempt={d}/{d} 重试成功", .{ attempt, HTTP_POST_MAX_ATTEMPTS });
-        }
-        return data;
-    }
+    return zhttpenh.httpPostFormWithRetry(allocator, client, url, body, .{
+        .max_attempts = HTTP_POST_MAX_ATTEMPTS,
+        .retry_delay_ms = HTTP_POST_RETRY_DELAY_MS,
+        .timeout_sec = timeout_sec,
+        .poll_interval_ms = NETWORK_POLL_INTERVAL_MS,
+    });
 }
 
 fn shouldRetryHttpPost(err: anyerror, attempt: u32) bool {
     if (attempt >= HTTP_POST_MAX_ATTEMPTS) return false;
 
     return err == error.UnknownHostName;
-}
-
-fn httpPostForm(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, body: []const u8, timeout_sec: u32) ![]u8 {
-    // 使用 Zig 0.15.2+ fetch API POST 表单（稳定路径）
-    logger.debug("httpPostForm: 使用 fetch API 发送 POST", .{});
-    logger.debug("POST {s}", .{url});
-
-    logger.debug("httpPostForm: 发送请求...", .{});
-    const fetch_start = compat.nanoTimestamp();
-    const response = try zhttp.fetchBytesWithTimeout(allocator, client, .{
-        .url = url,
-        .method = .POST,
-        .payload = body,
-        .headers = .{
-            .content_type = .{ .override = "application/x-www-form-urlencoded" },
-        },
-        .user_agent = "Zig-DDNS/1.0",
-    }, @as(u64, timeout_sec) * std.time.ms_per_s, NETWORK_POLL_INTERVAL_MS);
-    errdefer allocator.free(response.body);
-
-    const fetch_elapsed_ms = @divFloor(compat.nanoTimestamp() - fetch_start, std.time.ns_per_ms);
-    logger.debug("httpPostForm: 请求完成，耗时 {d}ms，准备处理响应体", .{fetch_elapsed_ms});
-    const resp_buf = response.body;
-
-    logger.debug("post encoding gzip_magic={any}", .{zhttp.isGzipMagic(resp_buf)});
-    if (zhttp.isGzipMagic(resp_buf)) {
-        defer allocator.free(resp_buf);
-        return try zhttp.gzipDecompressAlloc(allocator, resp_buf);
-    }
-    return resp_buf;
 }
 
 // 打印 DNSPod 返回中的 status.code 与 status.message，若无法解析，打印前 200 字节作为诊断
@@ -618,37 +536,18 @@ fn printDnspodStatus(allocator: std.mem.Allocator, resp: []const u8) void {
 
 // 构造 application/x-www-form-urlencoded 表单体
 fn allocFormEncoded(allocator: std.mem.Allocator, fields: []const struct { key: []const u8, v1: []const u8, v2: []const u8 }) ![]u8 {
-    var parts: std.ArrayList([]const u8) = .empty;
-    defer parts.deinit(allocator);
+    var enhanced_fields = try allocator.alloc(zhttpenh.FormField, fields.len);
+    defer allocator.free(enhanced_fields);
 
-    for (fields) |f| {
-        if (std.mem.eql(u8, f.key, "login_token")) {
-            const key = try zhttp.percentEncodeFormComponent(allocator, f.key);
-            defer allocator.free(key);
-
-            const token_id = try zhttp.percentEncodeFormComponent(allocator, f.v1);
-            defer allocator.free(token_id);
-
-            const token = try zhttp.percentEncodeFormComponent(allocator, f.v2);
-            defer allocator.free(token);
-
-            const kv = try std.fmt.allocPrint(allocator, "{s}={s},{s}", .{ key, token_id, token });
-            try parts.append(allocator, kv);
-        } else if (f.v1.len != 0) {
-            const key = try zhttp.percentEncodeFormComponent(allocator, f.key);
-            defer allocator.free(key);
-
-            const value = try zhttp.percentEncodeFormComponent(allocator, f.v1);
-            defer allocator.free(value);
-
-            const kv = try std.fmt.allocPrint(allocator, "{s}={s}", .{ key, value });
-            try parts.append(allocator, kv);
-        }
+    for (fields, 0..) |field, index| {
+        enhanced_fields[index] = .{
+            .key = field.key,
+            .v1 = field.v1,
+            .v2 = field.v2,
+        };
     }
 
-    const joined = try std.mem.join(allocator, "&", parts.items);
-    for (parts.items) |part| allocator.free(part);
-    return joined;
+    return zhttpenh.buildFormEncoded(allocator, enhanced_fields);
 }
 
 test "allocFormEncoded preserves raw comma in login_token" {

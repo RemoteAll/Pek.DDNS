@@ -17,33 +17,6 @@ fn configError() noreturn {
     std.process.exit(1);
 }
 
-/// 将 sub_domain 字符串按逗号或分号分隔为子域名列表
-/// 支持格式: "www" / "www,@" / "www;home" / "www,@,home"
-/// 分隔后去除首尾空白，跳过空段
-fn splitSubDomains(allocator: std.mem.Allocator, input: []const u8) ![][]const u8 {
-    var list: std.ArrayList([]const u8) = .empty;
-    defer list.deinit(allocator);
-
-    var start: usize = 0;
-    for (input, 0..) |ch, i| {
-        if (ch == ',' or ch == ';') {
-            // 提取当前段，去除首尾空白
-            const segment = std.mem.trim(u8, input[start..i], " \t");
-            if (segment.len > 0) {
-                try list.append(allocator, segment);
-            }
-            start = i + 1;
-        }
-    }
-    // 处理最后一段
-    const last = std.mem.trim(u8, input[start..], " \t");
-    if (last.len > 0) {
-        try list.append(allocator, last);
-    }
-
-    return list.toOwnedSlice(allocator);
-}
-
 pub fn main(init: std.process.Init) !void {
     const console_result = zzig.Console.init(.{});
     defer zzig.Console.deinit(console_result);
@@ -148,7 +121,7 @@ pub fn main(init: std.process.Init) !void {
             }
             break :blk2 v.string;
         } else "@"; // 默认子域名为根域名
-        break :blk splitSubDomains(allocator, raw) catch |e| {
+        break :blk zzig.Strings.splitMulti(allocator, raw, ",;") catch |e| {
             logger.err("解析 sub_domain 字段失败: {s}", .{@errorName(e)});
             configError();
         };
