@@ -199,12 +199,20 @@ fn runOnce(allocator: std.mem.Allocator, config: Config) !void {
     defer client.deinit();
 
     // 使用超时保护执行网络请求
-    logger.debug("→ runOnce: 调用 fetchPublicIPv4...", .{});
-    const ip = fetchPublicIPv4(allocator, &client, config.ip_source_url, NETWORK_TIMEOUT_SEC) catch |err| {
+    logger.debug("→ runOnce: 调用 ZZig.HttpEnhanced 获取公网 IP...", .{});
+    logger.debug("fetchPublicIPv4: 准备发起请求", .{});
+    logger.debug("POST {s} (form: from=hlktech-nuget)", .{config.ip_source_url});
+    const ip = zhttpenh.fetchPublicIPv4AddressWithRetry(allocator, &client, config.ip_source_url, .{
+        .max_attempts = HTTP_POST_MAX_ATTEMPTS,
+        .retry_delay_ms = HTTP_POST_RETRY_DELAY_MS,
+        .timeout_sec = NETWORK_TIMEOUT_SEC,
+        .poll_interval_ms = NETWORK_POLL_INTERVAL_MS,
+    }) catch |err| {
         logger.err("✗ runOnce: 获取 IP 失败 - {s}", .{@errorName(err)});
         return err;
     };
     defer allocator.free(ip);
+    logger.debug("fetchPublicIPv4: 完成，IP = {s}", .{ip});
     logger.info("✓ runOnce: 获取到 IP = {s}", .{ip});
 
     logger.debug("→ runOnce: 开始更新 DNS 记录 (provider={s})", .{@tagName(config.provider)});
@@ -222,20 +230,6 @@ fn runOnce(allocator: std.mem.Allocator, config: Config) !void {
         },
     }
     logger.info("✓ runOnce: DNS 更新完成", .{});
-}
-
-fn fetchPublicIPv4(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, timeout_sec: u32) ![]u8 {
-    logger.debug("fetchPublicIPv4: 准备发起请求", .{});
-    logger.debug("POST {s} (form: from=hlktech-nuget)", .{url});
-
-    const ip = try zhttpenh.fetchPublicIPv4AddressWithRetry(allocator, client, url, .{
-        .max_attempts = HTTP_POST_MAX_ATTEMPTS,
-        .retry_delay_ms = HTTP_POST_RETRY_DELAY_MS,
-        .timeout_sec = timeout_sec,
-        .poll_interval_ms = NETWORK_POLL_INTERVAL_MS,
-    });
-    logger.debug("fetchPublicIPv4: 完成，IP = {s}", .{ip});
-    return ip;
 }
 
 const providers = struct {
@@ -332,7 +326,14 @@ const providers = struct {
         defer allocator.free(body);
         logger.debug("dnspod Record.List - domain={s} sub_domain={s} type={s}", .{ domain, sub, rtype });
 
-        const resp = try httpPostFormWithRetry(allocator, client, "https://dnsapi.cn/Record.List", body, NETWORK_TIMEOUT_SEC);
+        logger.debug("httpPostForm: 使用 ZZig.HttpEnhanced 发送 POST", .{});
+        logger.debug("POST {s}", .{"https://dnsapi.cn/Record.List"});
+        const resp = try zhttpenh.httpPostFormWithRetry(allocator, client, "https://dnsapi.cn/Record.List", body, .{
+            .max_attempts = HTTP_POST_MAX_ATTEMPTS,
+            .retry_delay_ms = HTTP_POST_RETRY_DELAY_MS,
+            .timeout_sec = NETWORK_TIMEOUT_SEC,
+            .poll_interval_ms = NETWORK_POLL_INTERVAL_MS,
+        });
         defer allocator.free(resp);
         // 打印接口原始 JSON（完整）
         logger.debug("dnspod response: {s}", .{resp});
@@ -384,7 +385,14 @@ const providers = struct {
         const body = try zhttpenh.buildFormEncoded(allocator, &fields);
         defer allocator.free(body);
         logger.debug("dnspod Record.Create - domain={s} sub={s} type={s} value={s}", .{ domain, sub, rtype, ip });
-        const resp = try httpPostFormWithRetry(allocator, client, "https://dnsapi.cn/Record.Create", body, NETWORK_TIMEOUT_SEC);
+        logger.debug("httpPostForm: 使用 ZZig.HttpEnhanced 发送 POST", .{});
+        logger.debug("POST {s}", .{"https://dnsapi.cn/Record.Create"});
+        const resp = try zhttpenh.httpPostFormWithRetry(allocator, client, "https://dnsapi.cn/Record.Create", body, .{
+            .max_attempts = HTTP_POST_MAX_ATTEMPTS,
+            .retry_delay_ms = HTTP_POST_RETRY_DELAY_MS,
+            .timeout_sec = NETWORK_TIMEOUT_SEC,
+            .poll_interval_ms = NETWORK_POLL_INTERVAL_MS,
+        });
         defer allocator.free(resp);
         logger.debug("dnspod response: {s}", .{resp});
         printDnspodStatus(allocator, resp);
@@ -411,25 +419,20 @@ const providers = struct {
         const body = try zhttpenh.buildFormEncoded(allocator, &fields);
         defer allocator.free(body);
         logger.debug("dnspod Record.Modify - id={s} domain={s} sub={s} type={s} new_value={s}", .{ record_id, domain, sub, rtype, ip });
-        const resp = try httpPostFormWithRetry(allocator, client, "https://dnsapi.cn/Record.Modify", body, NETWORK_TIMEOUT_SEC);
+        logger.debug("httpPostForm: 使用 ZZig.HttpEnhanced 发送 POST", .{});
+        logger.debug("POST {s}", .{"https://dnsapi.cn/Record.Modify"});
+        const resp = try zhttpenh.httpPostFormWithRetry(allocator, client, "https://dnsapi.cn/Record.Modify", body, .{
+            .max_attempts = HTTP_POST_MAX_ATTEMPTS,
+            .retry_delay_ms = HTTP_POST_RETRY_DELAY_MS,
+            .timeout_sec = NETWORK_TIMEOUT_SEC,
+            .poll_interval_ms = NETWORK_POLL_INTERVAL_MS,
+        });
         defer allocator.free(resp);
         logger.debug("dnspod response: {s}", .{resp});
         printDnspodStatus(allocator, resp);
         if (std.mem.indexOf(u8, resp, "\"code\":\"1\"") == null) return error.ApiFailed;
     }
 };
-
-fn httpPostFormWithRetry(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, body: []const u8, timeout_sec: u32) ![]u8 {
-    logger.debug("httpPostForm: 使用 ZZig.HttpEnhanced 发送 POST", .{});
-    logger.debug("POST {s}", .{url});
-
-    return zhttpenh.httpPostFormWithRetry(allocator, client, url, body, .{
-        .max_attempts = HTTP_POST_MAX_ATTEMPTS,
-        .retry_delay_ms = HTTP_POST_RETRY_DELAY_MS,
-        .timeout_sec = timeout_sec,
-        .poll_interval_ms = NETWORK_POLL_INTERVAL_MS,
-    });
-}
 
 // 打印 DNSPod 返回中的 status.code 与 status.message，若无法解析，打印前 200 字节作为诊断
 fn printDnspodStatus(allocator: std.mem.Allocator, resp: []const u8) void {
