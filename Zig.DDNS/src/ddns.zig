@@ -618,18 +618,47 @@ fn printDnspodStatus(allocator: std.mem.Allocator, resp: []const u8) void {
 
 // 构造 application/x-www-form-urlencoded 表单体
 fn allocFormEncoded(allocator: std.mem.Allocator, fields: []const struct { key: []const u8, v1: []const u8, v2: []const u8 }) ![]u8 {
-    var encoded_fields: std.ArrayList(zhttp.FormField) = .empty;
-    defer encoded_fields.deinit(allocator);
+    var parts: std.ArrayList([]const u8) = .empty;
+    defer parts.deinit(allocator);
 
     for (fields) |f| {
         if (std.mem.eql(u8, f.key, "login_token")) {
-            const token = try std.fmt.allocPrint(allocator, "{s},{s}", .{ f.v1, f.v2 });
+            const key = try zhttp.percentEncodeFormComponent(allocator, f.key);
+            defer allocator.free(key);
+
+            const token_id = try zhttp.percentEncodeFormComponent(allocator, f.v1);
+            defer allocator.free(token_id);
+
+            const token = try zhttp.percentEncodeFormComponent(allocator, f.v2);
             defer allocator.free(token);
-            try encoded_fields.append(allocator, .{ .key = f.key, .value = token });
+
+            const kv = try std.fmt.allocPrint(allocator, "{s}={s},{s}", .{ key, token_id, token });
+            try parts.append(allocator, kv);
         } else if (f.v1.len != 0) {
-            try encoded_fields.append(allocator, .{ .key = f.key, .value = f.v1 });
+            const key = try zhttp.percentEncodeFormComponent(allocator, f.key);
+            defer allocator.free(key);
+
+            const value = try zhttp.percentEncodeFormComponent(allocator, f.v1);
+            defer allocator.free(value);
+
+            const kv = try std.fmt.allocPrint(allocator, "{s}={s}", .{ key, value });
+            try parts.append(allocator, kv);
         }
     }
 
-    return zhttp.buildFormUrlEncoded(allocator, encoded_fields.items);
+    const joined = try std.mem.join(allocator, "&", parts.items);
+    for (parts.items) |part| allocator.free(part);
+    return joined;
+}
+
+test "allocFormEncoded preserves raw comma in login_token" {
+    const allocator = std.testing.allocator;
+
+    const body = try allocFormEncoded(allocator, &.{
+        .{ .key = "login_token", .v1 = "123456", .v2 = "abcdef" },
+        .{ .key = "format", .v1 = "json", .v2 = "" },
+    });
+    defer allocator.free(body);
+
+    try std.testing.expectEqualStrings("login_token=123456,abcdef&format=json", body);
 }
