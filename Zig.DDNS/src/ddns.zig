@@ -321,13 +321,14 @@ const providers = struct {
     fn dnspod_find_record(allocator: std.mem.Allocator, client: *std.http.Client, dp: DnsPodConfig, domain: []const u8, sub: []const u8, rtype: []const u8) !?DnsPodRecord {
         // POST https://dnsapi.cn/Record.List
         // params: login_token, format=json, domain, sub_domain, record_type
-        const body = try allocFormEncoded(allocator, &.{
+        const fields = [_]zhttpenh.FormField{
             .{ .key = "login_token", .v1 = dp.token_id, .v2 = dp.token },
             .{ .key = "format", .v1 = "json", .v2 = "" },
             .{ .key = "domain", .v1 = domain, .v2 = "" },
             .{ .key = "sub_domain", .v1 = sub, .v2 = "" },
             .{ .key = "record_type", .v1 = rtype, .v2 = "" },
-        });
+        };
+        const body = try zhttpenh.buildFormEncoded(allocator, &fields);
         defer allocator.free(body);
         logger.debug("dnspod Record.List - domain={s} sub_domain={s} type={s}", .{ domain, sub, rtype });
 
@@ -370,7 +371,7 @@ const providers = struct {
         const ttl_str = try std.fmt.allocPrint(allocator, "{d}", .{dp.ttl});
         defer allocator.free(ttl_str);
 
-        const body = try allocFormEncoded(allocator, &.{
+        const fields = [_]zhttpenh.FormField{
             .{ .key = "login_token", .v1 = dp.token_id, .v2 = dp.token },
             .{ .key = "format", .v1 = "json", .v2 = "" },
             .{ .key = "domain", .v1 = domain, .v2 = "" },
@@ -379,7 +380,8 @@ const providers = struct {
             .{ .key = "record_line", .v1 = cfg.dnspod.?.line, .v2 = "" },
             .{ .key = "value", .v1 = ip, .v2 = "" },
             .{ .key = "ttl", .v1 = ttl_str, .v2 = "" },
-        });
+        };
+        const body = try zhttpenh.buildFormEncoded(allocator, &fields);
         defer allocator.free(body);
         logger.debug("dnspod Record.Create - domain={s} sub={s} type={s} value={s}", .{ domain, sub, rtype, ip });
         const resp = try httpPostFormWithRetry(allocator, client, "https://dnsapi.cn/Record.Create", body, NETWORK_TIMEOUT_SEC);
@@ -395,7 +397,7 @@ const providers = struct {
         const ttl_str = try std.fmt.allocPrint(allocator, "{d}", .{dp.ttl});
         defer allocator.free(ttl_str);
 
-        const body = try allocFormEncoded(allocator, &.{
+        const fields = [_]zhttpenh.FormField{
             .{ .key = "login_token", .v1 = dp.token_id, .v2 = dp.token },
             .{ .key = "format", .v1 = "json", .v2 = "" },
             .{ .key = "domain", .v1 = domain, .v2 = "" },
@@ -405,7 +407,8 @@ const providers = struct {
             .{ .key = "record_line", .v1 = cfg.dnspod.?.line, .v2 = "" },
             .{ .key = "value", .v1 = ip, .v2 = "" },
             .{ .key = "ttl", .v1 = ttl_str, .v2 = "" },
-        });
+        };
+        const body = try zhttpenh.buildFormEncoded(allocator, &fields);
         defer allocator.free(body);
         logger.debug("dnspod Record.Modify - id={s} domain={s} sub={s} type={s} new_value={s}", .{ record_id, domain, sub, rtype, ip });
         const resp = try httpPostFormWithRetry(allocator, client, "https://dnsapi.cn/Record.Modify", body, NETWORK_TIMEOUT_SEC);
@@ -451,32 +454,4 @@ fn printDnspodStatus(allocator: std.mem.Allocator, resp: []const u8) void {
     };
     const max = if (resp.len > 200) 200 else resp.len;
     logger.debug("dnspod status raw: {s}...", .{resp[0..max]});
-}
-
-// 构造 application/x-www-form-urlencoded 表单体
-fn allocFormEncoded(allocator: std.mem.Allocator, fields: []const struct { key: []const u8, v1: []const u8, v2: []const u8 }) ![]u8 {
-    var enhanced_fields = try allocator.alloc(zhttpenh.FormField, fields.len);
-    defer allocator.free(enhanced_fields);
-
-    for (fields, 0..) |field, index| {
-        enhanced_fields[index] = .{
-            .key = field.key,
-            .v1 = field.v1,
-            .v2 = field.v2,
-        };
-    }
-
-    return zhttpenh.buildFormEncoded(allocator, enhanced_fields);
-}
-
-test "allocFormEncoded preserves raw comma in login_token" {
-    const allocator = std.testing.allocator;
-
-    const body = try allocFormEncoded(allocator, &.{
-        .{ .key = "login_token", .v1 = "123456", .v2 = "abcdef" },
-        .{ .key = "format", .v1 = "json", .v2 = "" },
-    });
-    defer allocator.free(body);
-
-    try std.testing.expectEqualStrings("login_token=123456,abcdef&format=json", body);
 }
