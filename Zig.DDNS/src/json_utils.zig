@@ -2,15 +2,17 @@
 //!
 //! 本库专注于常见的 JSON 查询场景，提供简单高效的 API。
 //! 设计目标：
-//! 1. 轻量级：避免完整 JSON 解析的开销
-//! 2. 高性能：直接字符串操作，适合简单查询
+//! 1. 轻量级：围绕常见查询场景提供薄包装
+//! 2. 高性能：复用 zzig.json tokenizer，避免重复实现 JSON 扫描逻辑
 //! 3. 类型安全：利用 Zig 编译期检查
 //! 4. 易用性：提供链式查询和多种便捷方法
 //!
 //! 未来可独立成库供其他项目使用。
 
 const std = @import("std");
+const zzig = @import("zzig");
 const Allocator = std.mem.Allocator;
+const Parser = zzig.json.createDesktopParser();
 
 /// JSON 查询错误类型
 pub const Error = error{
@@ -39,200 +41,58 @@ pub const JsonQuery = struct {
         };
     }
 
-    /// 检查 JSON 对象是否包含指定的键值对（忽略空白符）
-    /// 这个方法会智能处理 JSON 中的空格、换行等格式差异
-    fn containsKeyValue(json_obj: []const u8, key: []const u8, value: []const u8) bool {
-        // 构建键的模式：查找 "key"
-        var key_start: usize = 0;
-        while (key_start < json_obj.len) {
-            // 查找 "key" 的位置
-            const quote_pos = std.mem.indexOfPos(u8, json_obj, key_start, "\"") orelse break;
-
-            // 检查这是否是我们要找的键
-            if (quote_pos + 1 + key.len < json_obj.len) {
-                const potential_key = json_obj[quote_pos + 1 .. quote_pos + 1 + key.len];
-                if (std.mem.eql(u8, potential_key, key)) {
-                    // 确认后面是引号和冒号
-                    var pos = quote_pos + 1 + key.len;
-                    if (pos < json_obj.len and json_obj[pos] == '"') {
-                        pos += 1;
-                        // 跳过空白
-                        while (pos < json_obj.len and std.ascii.isWhitespace(json_obj[pos])) : (pos += 1) {}
-                        if (pos < json_obj.len and json_obj[pos] == ':') {
-                            pos += 1;
-                            // 跳过冒号后的空白
-                            while (pos < json_obj.len and std.ascii.isWhitespace(json_obj[pos])) : (pos += 1) {}
-                            // 检查值
-                            if (pos < json_obj.len and json_obj[pos] == '"') {
-                                pos += 1;
-                                if (pos + value.len <= json_obj.len) {
-                                    const potential_value = json_obj[pos .. pos + value.len];
-                                    if (std.mem.eql(u8, potential_value, value)) {
-                                        // 确认后面是引号
-                                        if (pos + value.len < json_obj.len and json_obj[pos + value.len] == '"') {
-                                            return true;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            key_start = quote_pos + 1;
-        }
-
-        return false;
-    }
-
-    /// 查找字符串值（自动忽略空白符，支持各种格式）
+    /// 查找字符串值
     /// 示例: query.getString("name") -> "value"
     /// 返回值由调用方负责释放
-    ///
-    /// 性能优化：直接在原始 JSON 上操作，零额外内存分配（除结果外）
     pub fn getString(self: JsonQuery, key: []const u8) Error![]u8 {
-        // 查找键的起始位置：查找 "key" （键必须是被引号包围的）
-        var search_pos: usize = 0;
-        while (search_pos < self.json.len) {
-            // 查找下一个引号
-            const quote_start = std.mem.indexOfPos(u8, self.json, search_pos, "\"") orelse return Error.KeyNotFound;
+        const parsed = try parseJson(self.allocator, self.json);
+        defer parsed.deinit();
 
-            // 检查引号后是否匹配键名
-            const potential_key_start = quote_start + 1;
-            if (potential_key_start + key.len > self.json.len) {
-                return Error.KeyNotFound;
-            }
-
-            const potential_key = self.json[potential_key_start .. potential_key_start + key.len];
-            if (std.mem.eql(u8, potential_key, key)) {
-                var pos = potential_key_start + key.len;
-
-                // 必须紧跟着引号结束键
-                if (pos >= self.json.len or self.json[pos] != '"') {
-                    search_pos = quote_start + 1;
-                    continue;
-                }
-                pos += 1;
-
-                // 跳过空白符
-                while (pos < self.json.len and std.ascii.isWhitespace(self.json[pos])) : (pos += 1) {}
-
-                // 必须是冒号
-                if (pos >= self.json.len or self.json[pos] != ':') {
-                    search_pos = quote_start + 1;
-                    continue;
-                }
-                pos += 1;
-
-                // 跳过冒号后的空白符
-                while (pos < self.json.len and std.ascii.isWhitespace(self.json[pos])) : (pos += 1) {}
-
-                // 值必须以引号开始（字符串值）
-                if (pos >= self.json.len or self.json[pos] != '"') {
-                    return Error.TypeMismatch;
-                }
-                pos += 1;
-
-                // 找到值的结束引号（简化处理，不考虑转义）
-                const value_start = pos;
-                const value_end = std.mem.indexOfPos(u8, self.json, pos, "\"") orelse return Error.InvalidFormat;
-
-                return self.allocator.dupe(u8, self.json[value_start..value_end]);
-            }
-
-            search_pos = quote_start + 1;
-        }
-
-        return Error.KeyNotFound;
+        const value_index = findObjectValueAt(parsed.tokens, parsed.count, self.json, 0, key) orelse return Error.KeyNotFound;
+        return dupStringToken(self.allocator, parsed.tokens[value_index], self.json);
     }
 
     /// 查找数字值
     /// 示例: query.getInt("age") -> 25
     pub fn getInt(self: JsonQuery, comptime T: type, key: []const u8) Error!T {
-        const key_pattern = try std.fmt.allocPrint(
-            self.allocator,
-            "\"{s}\":",
-            .{key},
-        );
-        defer self.allocator.free(key_pattern);
+        const parsed = try parseJson(self.allocator, self.json);
+        defer parsed.deinit();
 
-        const start_pos = std.mem.indexOf(u8, self.json, key_pattern) orelse return Error.KeyNotFound;
-        const value_start = start_pos + key_pattern.len;
-        var value_slice = self.json[value_start..];
+        const value_index = findObjectValueAt(parsed.tokens, parsed.count, self.json, 0, key) orelse return Error.KeyNotFound;
+        const token = parsed.tokens[value_index];
+        if (token.typ != .Primitive) return Error.TypeMismatch;
 
-        // 跳过空白
-        while (value_slice.len > 0 and std.ascii.isWhitespace(value_slice[0])) {
-            value_slice = value_slice[1..];
-        }
-
-        // 查找数字结束位置
-        var end: usize = 0;
-        while (end < value_slice.len) : (end += 1) {
-            const c = value_slice[end];
-            if (!std.ascii.isDigit(c) and c != '-' and c != '.') break;
-        }
-
-        if (end == 0) return Error.InvalidFormat;
-
-        return std.fmt.parseInt(T, value_slice[0..end], 10) catch Error.TypeMismatch;
+        const value = Parser.parseInteger(token, self.json) catch return Error.TypeMismatch;
+        return std.math.cast(T, value) orelse Error.TypeMismatch;
     }
 
     /// 查找布尔值
     /// 示例: query.getBool("active") -> true
     pub fn getBool(self: JsonQuery, key: []const u8) Error!bool {
-        const key_pattern = try std.fmt.allocPrint(
-            self.allocator,
-            "\"{s}\":",
-            .{key},
-        );
-        defer self.allocator.free(key_pattern);
+        const parsed = try parseJson(self.allocator, self.json);
+        defer parsed.deinit();
 
-        const start_pos = std.mem.indexOf(u8, self.json, key_pattern) orelse return Error.KeyNotFound;
-        const value_start = start_pos + key_pattern.len;
-        var value_slice = self.json[value_start..];
+        const value_index = findObjectValueAt(parsed.tokens, parsed.count, self.json, 0, key) orelse return Error.KeyNotFound;
+        const token = parsed.tokens[value_index];
+        if (token.typ != .Primitive) return Error.TypeMismatch;
 
-        // 跳过空白
-        while (value_slice.len > 0 and std.ascii.isWhitespace(value_slice[0])) {
-            value_slice = value_slice[1..];
-        }
-
-        if (std.mem.startsWith(u8, value_slice, "true")) return true;
-        if (std.mem.startsWith(u8, value_slice, "false")) return false;
-
+        const raw = Parser.tokenText(token, self.json);
+        if (std.mem.eql(u8, raw, "true")) return true;
+        if (std.mem.eql(u8, raw, "false")) return false;
         return Error.TypeMismatch;
     }
 
     /// 查找对象（返回子查询器）
     /// 示例: query.getObject("user").getString("name")
     pub fn getObject(self: JsonQuery, key: []const u8) Error!JsonQuery {
-        const key_pattern = try std.fmt.allocPrint(
-            self.allocator,
-            "\"{s}\":{{",
-            .{key},
-        );
-        defer self.allocator.free(key_pattern);
+        const parsed = try parseJson(self.allocator, self.json);
+        defer parsed.deinit();
 
-        const start_pos = std.mem.indexOf(u8, self.json, key_pattern) orelse return Error.KeyNotFound;
-        const obj_start = start_pos + key_pattern.len - 1; // 包含 {
+        const value_index = findObjectValueAt(parsed.tokens, parsed.count, self.json, 0, key) orelse return Error.KeyNotFound;
+        const token = parsed.tokens[value_index];
+        if (token.typ != .Object) return Error.TypeMismatch;
 
-        // 查找匹配的 }
-        var depth: i32 = 0;
-        var pos: usize = obj_start;
-        while (pos < self.json.len) : (pos += 1) {
-            switch (self.json[pos]) {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if (depth == 0) {
-                        return JsonQuery.init(self.allocator, self.json[obj_start .. pos + 1]);
-                    }
-                },
-                else => {},
-            }
-        }
-
-        return Error.InvalidFormat;
+        return JsonQuery.init(self.allocator, self.json[token.start..token.end]);
     }
 
     /// 查找数组中符合条件的第一个元素
@@ -244,72 +104,32 @@ pub const JsonQuery = struct {
         match_key: []const u8,
         match_value: []const u8,
     ) Error!JsonQuery {
-        // 查找数组起始位置（需要处理空白）
-        var search_pos: usize = 0;
-        const array_start_pos = while (search_pos < self.json.len) {
-            const quote_pos = std.mem.indexOfPos(u8, self.json, search_pos, "\"") orelse return Error.KeyNotFound;
-            const key_start = quote_pos + 1;
+        const parsed = try parseJson(self.allocator, self.json);
+        defer parsed.deinit();
 
-            if (key_start + array_key.len <= self.json.len) {
-                const potential_key = self.json[key_start .. key_start + array_key.len];
-                if (std.mem.eql(u8, potential_key, array_key)) {
-                    var pos = key_start + array_key.len;
-                    if (pos < self.json.len and self.json[pos] == '"') {
-                        pos += 1;
-                        while (pos < self.json.len and std.ascii.isWhitespace(self.json[pos])) : (pos += 1) {}
-                        if (pos < self.json.len and self.json[pos] == ':') {
-                            pos += 1;
-                            while (pos < self.json.len and std.ascii.isWhitespace(self.json[pos])) : (pos += 1) {}
-                            if (pos < self.json.len and self.json[pos] == '[') {
-                                break pos + 1;
-                            }
-                        }
+        const array_index = if (array_key.len == 0)
+            0
+        else
+            findObjectValueAt(parsed.tokens, parsed.count, self.json, 0, array_key) orelse return Error.KeyNotFound;
+
+        const array_token = parsed.tokens[array_index];
+        if (array_token.typ != .Array) return Error.TypeMismatch;
+
+        var item_index = array_index + 1;
+        var remaining: usize = @intCast(array_token.size);
+        while (remaining > 0 and item_index < parsed.count) {
+            const item_token = parsed.tokens[item_index];
+            if (item_token.typ == .Object) {
+                const match_index = findObjectValueAt(parsed.tokens, parsed.count, self.json, item_index, match_key);
+                if (match_index) |value_index| {
+                    if (stringTokenEquals(parsed.tokens[value_index], self.json, match_value)) {
+                        return JsonQuery.init(self.allocator, self.json[item_token.start..item_token.end]);
                     }
                 }
             }
-            search_pos = quote_pos + 1;
-        } else return Error.KeyNotFound;
 
-        var pos = array_start_pos;
-
-        // 遍历数组元素
-        while (pos < self.json.len) {
-            // 跳过空白
-            while (pos < self.json.len and std.ascii.isWhitespace(self.json[pos])) : (pos += 1) {}
-
-            if (pos >= self.json.len) break;
-            if (self.json[pos] == ']') break; // 数组结束
-
-            if (self.json[pos] == '{') {
-                const obj_start = pos;
-                var depth: i32 = 0;
-                var obj_end: usize = pos;
-
-                // 查找对象结束位置
-                while (obj_end < self.json.len) : (obj_end += 1) {
-                    switch (self.json[obj_end]) {
-                        '{' => depth += 1,
-                        '}' => {
-                            depth -= 1;
-                            if (depth == 0) break;
-                        },
-                        else => {},
-                    }
-                }
-
-                if (depth != 0) return Error.InvalidFormat;
-
-                const obj_slice = self.json[obj_start .. obj_end + 1];
-
-                // 使用 containsKeyValue 检查（自动处理空白）
-                if (containsKeyValue(obj_slice, match_key, match_value)) {
-                    return JsonQuery.init(self.allocator, obj_slice);
-                }
-
-                pos = obj_end + 1;
-            } else {
-                pos += 1;
-            }
+            item_index = Parser.skipToken(parsed.tokens, item_index);
+            remaining -= 1;
         }
 
         return Error.ElementNotFound;
@@ -343,7 +163,7 @@ pub fn quickGetString(allocator: Allocator, json: []const u8, key: []const u8) E
 /// 返回值由调用方负责释放
 ///
 /// 特性：
-/// - 零内存分配（除了结果）
+/// - 基于 zzig.json tokenizer 的稳定查询
 /// - 自动处理各种 JSON 格式（空格、换行、缩进等）
 /// - 不依赖属性顺序
 /// - 支持根数组和命名数组
@@ -367,57 +187,6 @@ pub fn quickGetStringFromArray(
         target_key: []const u8,
     },
 ) Error![]u8 {
-    // 如果是根数组（以 [ 开头），直接处理
-    const is_root_array = blk: {
-        var idx: usize = 0;
-        while (idx < json.len and std.ascii.isWhitespace(json[idx])) : (idx += 1) {}
-        break :blk idx < json.len and json[idx] == '[';
-    };
-
-    if (is_root_array and options.array_key.len == 0) {
-        // 在根数组中查找（使用智能匹配）
-        var pos: usize = 0;
-        while (pos < json.len) {
-            while (pos < json.len and std.ascii.isWhitespace(json[pos])) : (pos += 1) {}
-            if (pos >= json.len) break;
-            if (json[pos] == ']') break;
-
-            if (json[pos] == '{') {
-                const obj_start = pos;
-                var depth: i32 = 0;
-                var obj_end: usize = pos;
-
-                while (obj_end < json.len) : (obj_end += 1) {
-                    switch (json[obj_end]) {
-                        '{' => depth += 1,
-                        '}' => {
-                            depth -= 1;
-                            if (depth == 0) break;
-                        },
-                        else => {},
-                    }
-                }
-
-                if (depth != 0) return Error.InvalidFormat;
-
-                const obj_slice = json[obj_start .. obj_end + 1];
-
-                // 使用智能匹配（自动处理空白符）
-                if (JsonQuery.containsKeyValue(obj_slice, options.match_key, options.match_value)) {
-                    const query = JsonQuery.init(allocator, obj_slice);
-                    return query.getString(options.target_key);
-                }
-
-                pos = obj_end + 1;
-            } else {
-                pos += 1;
-            }
-        }
-
-        return Error.ElementNotFound;
-    }
-
-    // 使用标准流程处理命名数组
     const query = JsonQuery.init(allocator, json);
     return query.getStringFromArray(
         options.array_key,
@@ -425,6 +194,74 @@ pub fn quickGetStringFromArray(
         options.match_value,
         options.target_key,
     );
+}
+
+const ParsedJson = struct {
+    allocator: ?Allocator,
+    tokens: []Parser.Token,
+    parents: []Parser.IndexT,
+    count: usize,
+
+    fn deinit(self: ParsedJson) void {
+        if (self.allocator) |allocator| {
+            allocator.free(self.tokens);
+            allocator.free(self.parents);
+        }
+    }
+};
+
+fn parseJson(allocator: Allocator, json: []const u8) Error!ParsedJson {
+    const token_count = Parser.estimateTokenCount(json);
+    const tokens = allocator.alloc(Parser.Token, token_count) catch return Error.OutOfMemory;
+    errdefer allocator.free(tokens);
+    const parents = allocator.alloc(Parser.IndexT, token_count) catch return Error.OutOfMemory;
+    errdefer allocator.free(parents);
+
+    const count = Parser.parseTokens(tokens, parents, json) catch return Error.InvalidFormat;
+    return .{
+        .allocator = allocator,
+        .tokens = tokens,
+        .parents = parents,
+        .count = count,
+    };
+}
+
+fn findObjectValueAt(tokens: []const Parser.Token, count: usize, input: []const u8, object_index: usize, key: []const u8) ?usize {
+    if (object_index >= count) return null;
+
+    const object_token = tokens[object_index];
+    if (object_token.typ != .Object) return null;
+
+    var child = object_index + 1;
+    var remaining: usize = @intCast(object_token.size);
+    while (remaining > 0 and child < count) {
+        const key_token = tokens[child];
+        if (key_token.typ != .String) return null;
+
+        remaining -= 1;
+        const value_index = child + 1;
+        if (value_index >= count or remaining == 0) return null;
+
+        if (std.mem.eql(u8, Parser.tokenText(key_token, input), key)) {
+            return value_index;
+        }
+
+        child = Parser.skipToken(tokens, value_index);
+        remaining -= 1;
+    }
+
+    return null;
+}
+
+fn dupStringToken(allocator: Allocator, token: Parser.Token, input: []const u8) Error![]u8 {
+    if (token.typ != .String) return Error.TypeMismatch;
+    const raw = Parser.tokenText(token, input);
+    return zzig.json.unescapeJsonStringAlloc(allocator, raw) catch Error.InvalidFormat;
+}
+
+fn stringTokenEquals(token: Parser.Token, input: []const u8, expected: []const u8) bool {
+    if (token.typ != .String) return false;
+    return std.mem.eql(u8, Parser.tokenText(token, input), expected);
 }
 
 // ============================================================================

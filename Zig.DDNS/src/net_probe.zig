@@ -1,17 +1,11 @@
 const std = @import("std");
 const zzig = @import("zzig");
 const compat = zzig.compat;
+const zhttp = zzig.Http;
 
 const probe_url = "https://t.sc8.fun/api/client-ip";
 const probe_payload = "from=hlktech-nuget&probe=1";
 const timeout_sec: u64 = 5;
-
-const ProbeResult = struct {
-    data: ?[]u8 = null,
-    err: ?anyerror = null,
-    completed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    mutex: compat.Mutex = .{},
-};
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -43,70 +37,28 @@ fn runProbe(allocator: std.mem.Allocator, label: []const u8, io: std.Io) !void {
 }
 
 fn fetchClientIpWithTimeout(allocator: std.mem.Allocator, io: std.Io, label: []const u8, timeout_seconds: u64) ![]u8 {
-    var result = ProbeResult{};
-    const thread = try std.Thread.spawn(.{}, fetchWorker, .{ allocator, io, label, &result });
-
-    const timeout_ns = timeout_seconds * std.time.ns_per_s;
-    const start = compat.nanoTimestamp();
-
-    while (true) {
-        if (result.completed.load(.acquire)) {
-            thread.join();
-
-            result.mutex.lock();
-            defer result.mutex.unlock();
-
-            if (result.err) |err| return err;
-            if (result.data) |data| return data;
-            return error.UnknownError;
-        }
-
-        if (compat.nanoTimestamp() - start >= timeout_ns) {
-            std.debug.print("[{s}] timeout after {d}s while waiting for fetch\n", .{ label, timeout_seconds });
-            thread.detach();
-            return error.RequestTimeout;
-        }
-
-        compat.sleep(100 * std.time.ns_per_ms);
-    }
+    return fetchClientIp(allocator, io, label, timeout_seconds);
 }
 
-fn fetchWorker(allocator: std.mem.Allocator, io: std.Io, label: []const u8, result: *ProbeResult) void {
-    std.debug.print("[{s}] worker-start\n", .{label});
-    defer result.completed.store(true, .release);
-
-    const body = fetchClientIp(allocator, io, label) catch |err| {
-        result.mutex.lock();
-        defer result.mutex.unlock();
-        result.err = err;
-        return;
-    };
-
-    result.mutex.lock();
-    defer result.mutex.unlock();
-    result.data = body;
-}
-
-fn fetchClientIp(allocator: std.mem.Allocator, io: std.Io, label: []const u8) ![]u8 {
+fn fetchClientIp(allocator: std.mem.Allocator, io: std.Io, label: []const u8, timeout_seconds: u64) ![]u8 {
     std.debug.print("[{s}] fetch-enter\n", .{label});
     var client: std.http.Client = .{ .allocator = allocator, .io = io };
     defer client.deinit();
 
-    var allocating_writer = std.Io.Writer.Allocating.init(allocator);
-    defer allocating_writer.deinit();
     std.debug.print("[{s}] fetch-dispatch\n", .{label});
-    const result = try client.fetch(.{
-        .location = .{ .url = probe_url },
+    const response = try zhttp.fetchBytesWithTimeout(allocator, &client, .{
+        .url = probe_url,
         .method = .POST,
         .payload = probe_payload,
         .headers = .{
             .content_type = .{ .override = "application/x-www-form-urlencoded" },
-            .user_agent = .{ .override = "Zig.DDNS.NetProbe/0.16" },
         },
-        .response_writer = &allocating_writer.writer,
-    });
-    std.debug.print("[{s}] fetch-return status={s}\n", .{ label, @tagName(result.status) });
+        .user_agent = "Zig.DDNS.NetProbe/0.16",
+    }, timeout_seconds * std.time.ms_per_s, 100);
+    errdefer allocator.free(response.body);
 
-    if (result.status != .ok) return error.UnexpectedStatus;
-    return try allocator.dupe(u8, allocating_writer.writer.buffer[0..allocating_writer.writer.end]);
+    std.debug.print("[{s}] fetch-return status={s}\n", .{ label, @tagName(response.status) });
+
+    if (response.status != .ok) return error.UnexpectedStatus;
+    return response.body;
 }

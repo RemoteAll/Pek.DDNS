@@ -1,6 +1,7 @@
 const std = @import("std");
 const zzig = @import("zzig");
 const compat = zzig.compat;
+const zhttp = zzig.Http;
 const json_utils = @import("json_utils.zig");
 const logger = @import("logger.zig");
 
@@ -224,77 +225,16 @@ fn runOnce(allocator: std.mem.Allocator, config: Config) !void {
     logger.info("✓ runOnce: DNS 更新完成", .{});
 }
 
-/// 带超时的字节结果
-const BytesRequestResult = struct {
-    data: ?[]u8 = null,
-    err: ?anyerror = null,
-    completed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-};
-
 /// 带超时保护的获取公网 IP
 fn fetchPublicIPv4WithTimeout(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, timeout_sec: u32) ![]u8 {
-    const io = client.io;
-    var result = BytesRequestResult{};
-    var future = io.concurrent(fetchWorker, .{ allocator, client, url, &result }) catch |err| switch (err) {
-        error.ConcurrencyUnavailable => {
-            logger.warn("fetchPublicIPv4: 当前 IO 不支持可取消并发，回退到同步请求", .{});
-            return fetchPublicIPv4WithRetry(allocator, client, url);
-        },
-    };
-
-    const timeout_ns = @as(u64, timeout_sec) * std.time.ns_per_s;
-    const start_time = compat.nanoTimestamp();
-
-    while (true) {
-        if (result.completed.load(.acquire)) {
-            _ = future.await(io);
-
-            if (result.err) |err| {
-                if (result.data) |data| allocator.free(data);
-                return err;
-            }
-
-            if (result.data) |data| {
-                return data;
-            }
-
-            return error.UnknownError;
-        }
-
-        const elapsed = compat.nanoTimestamp() - start_time;
-        if (elapsed >= timeout_ns) {
-            _ = future.cancel(io);
-            if (result.data) |data| {
-                allocator.free(data);
-                result.data = null;
-            }
-            logger.warn("⏱️ 网络请求超时 ({d}秒)，已取消 - {s}", .{ timeout_sec, url });
-            return error.RequestTimeout;
-        }
-
-        compat.sleep(NETWORK_POLL_INTERVAL_MS * std.time.ns_per_ms);
-    }
+    return fetchPublicIPv4WithRetry(allocator, client, url, timeout_sec);
 }
 
-/// 可取消任务：执行实际的公网 IP 请求
-fn fetchWorker(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, result: *BytesRequestResult) void {
-    defer {
-        result.completed.store(true, .release);
-    }
-
-    const ip = fetchPublicIPv4WithRetry(allocator, client, url) catch |err| {
-        result.err = err;
-        return;
-    };
-
-    result.data = ip;
-}
-
-fn fetchPublicIPv4WithRetry(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8) ![]u8 {
+fn fetchPublicIPv4WithRetry(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, timeout_sec: u32) ![]u8 {
     var attempt: u32 = 1;
 
     while (true) {
-        const ip = fetchPublicIPv4(allocator, client, url) catch |err| {
+        const ip = fetchPublicIPv4(allocator, client, url, timeout_sec) catch |err| {
             if (!shouldRetryHttpPost(err, attempt)) return err;
 
             logger.warn("fetchPublicIPv4: attempt={d}/{d} 失败 err={s}，{d}ms 后重试", .{
@@ -315,7 +255,7 @@ fn fetchPublicIPv4WithRetry(allocator: std.mem.Allocator, client: *std.http.Clie
     }
 }
 
-fn fetchPublicIPv4(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8) ![]u8 {
+fn fetchPublicIPv4(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, timeout_sec: u32) ![]u8 {
     logger.debug("fetchPublicIPv4: 准备发起请求", .{});
 
     logger.debug("POST {s} (form: from=hlktech-nuget)", .{url});
@@ -323,37 +263,31 @@ fn fetchPublicIPv4(allocator: std.mem.Allocator, client: *std.http.Client, url: 
     // 准备表单数据
     const form_data = "from=hlktech-nuget";
 
-    // 使用 Allocating Writer 捕获响应体
-    var allocating_writer = std.Io.Writer.Allocating.init(allocator);
-    defer allocating_writer.deinit();
-
     logger.debug("fetchPublicIPv4: 发送请求...", .{});
     const fetch_start = compat.nanoTimestamp();
-    _ = try client.fetch(.{
-        .location = .{ .url = url },
+    const response = try zhttp.fetchBytesWithTimeout(allocator, client, .{
+        .url = url,
         .method = .POST,
         .payload = form_data,
         .headers = .{
             .content_type = .{ .override = "application/x-www-form-urlencoded" },
         },
-        .response_writer = &allocating_writer.writer,
-    });
+    }, @as(u64, timeout_sec) * std.time.ms_per_s, NETWORK_POLL_INTERVAL_MS);
+    errdefer allocator.free(response.body);
 
     const fetch_elapsed_ms = @divFloor(compat.nanoTimestamp() - fetch_start, std.time.ns_per_ms);
     logger.debug("fetchPublicIPv4: 请求完成，耗时 {d}ms，准备处理响应体", .{fetch_elapsed_ms});
-    // 从 Allocating Writer 获取响应体
-    const body = allocating_writer.writer.buffer[0..allocating_writer.writer.end];
+    const body = response.body;
 
-    // 打印是否检测到压缩（通过 gzip 魔数）
-    const is_gzip = isGzipMagic(body);
+    const is_gzip = zhttp.isGzipMagic(body);
     logger.debug("ip-source encoding gzip_magic={any}", .{is_gzip});
 
     if (is_gzip) {
         logger.debug("fetchPublicIPv4: 开始 gzip 解压", .{});
-        const unzipped = try gzipDecompress(allocator, body);
+        defer allocator.free(body);
+        const unzipped = try zhttp.gzipDecompressAlloc(allocator, body);
         logger.debug("ip-source gunzip: {s}", .{unzipped});
         defer allocator.free(unzipped);
-        // 使用通用 JSON 工具库提取 Type 为 IPv4 的 Ip 字段
         logger.debug("fetchPublicIPv4: 解析 JSON 提取 IP", .{});
         const ip_field = try json_utils.quickGetStringFromArray(allocator, unzipped, .{
             .match_key = "Type",
@@ -362,20 +296,18 @@ fn fetchPublicIPv4(allocator: std.mem.Allocator, client: *std.http.Client, url: 
         });
         logger.debug("fetchPublicIPv4: 完成，IP = {s}", .{ip_field});
         return ip_field;
-    } else {
-        // 打印接口返回的原始数据，便于观察/调试
-        logger.debug("ip-source raw: {s}", .{body});
-        // 使用通用 JSON 工具库提取 Type 为 IPv4 的 Ip 字段
-        logger.debug("fetchPublicIPv4: 解析 JSON 提取 IP", .{});
-        const ip_field = try json_utils.quickGetStringFromArray(allocator, body, .{
-            .array_key = "Data",
-            .match_key = "Type",
-            .match_value = "IPv4",
-            .target_key = "Ip",
-        });
-        logger.debug("fetchPublicIPv4: 完成，IP = {s}", .{ip_field});
-        return ip_field;
     }
+
+    logger.debug("ip-source raw: {s}", .{body});
+    logger.debug("fetchPublicIPv4: 解析 JSON 提取 IP", .{});
+    const ip_field = try json_utils.quickGetStringFromArray(allocator, body, .{
+        .array_key = "Data",
+        .match_key = "Type",
+        .match_value = "IPv4",
+        .target_key = "Ip",
+    });
+    logger.debug("fetchPublicIPv4: 完成，IP = {s}", .{ip_field});
+    return ip_field;
 }
 
 fn runReadCmd(allocator: std.mem.Allocator, exe: []const u8, args: []const []const u8) ![]u8 {
@@ -595,68 +527,14 @@ const providers = struct {
 
 /// 带超时保护的 POST 请求
 fn httpPostFormWithTimeout(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, body: []const u8, timeout_sec: u32) ![]u8 {
-    const io = client.io;
-    var result = BytesRequestResult{};
-    var future = io.concurrent(postWorker, .{ allocator, client, url, body, &result }) catch |err| switch (err) {
-        error.ConcurrencyUnavailable => {
-            logger.warn("httpPostForm: 当前 IO 不支持可取消并发，回退到同步请求", .{});
-            return httpPostFormWithRetry(allocator, client, url, body);
-        },
-    };
-
-    const timeout_ns = @as(u64, timeout_sec) * std.time.ns_per_s;
-    const start_time = compat.nanoTimestamp();
-
-    while (true) {
-        if (result.completed.load(.acquire)) {
-            _ = future.await(io);
-
-            if (result.err) |err| {
-                if (result.data) |data| allocator.free(data);
-                return err;
-            }
-
-            if (result.data) |data| {
-                return data;
-            }
-
-            return error.UnknownError;
-        }
-
-        const elapsed = compat.nanoTimestamp() - start_time;
-        if (elapsed >= timeout_ns) {
-            _ = future.cancel(io);
-            if (result.data) |data| {
-                allocator.free(data);
-                result.data = null;
-            }
-            logger.warn("⏱️ POST 请求超时 ({d}秒)，已取消 - {s}", .{ timeout_sec, url });
-            return error.RequestTimeout;
-        }
-
-        compat.sleep(NETWORK_POLL_INTERVAL_MS * std.time.ns_per_ms);
-    }
+    return httpPostFormWithRetry(allocator, client, url, body, timeout_sec);
 }
 
-/// 可取消任务：执行实际的 POST 请求
-fn postWorker(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, body: []const u8, result: *BytesRequestResult) void {
-    defer {
-        result.completed.store(true, .release);
-    }
-
-    const data = httpPostFormWithRetry(allocator, client, url, body) catch |err| {
-        result.err = err;
-        return;
-    };
-
-    result.data = data;
-}
-
-fn httpPostFormWithRetry(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, body: []const u8) ![]u8 {
+fn httpPostFormWithRetry(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, body: []const u8, timeout_sec: u32) ![]u8 {
     var attempt: u32 = 1;
 
     while (true) {
-        const data = httpPostForm(allocator, client, url, body) catch |err| {
+        const data = httpPostForm(allocator, client, url, body, timeout_sec) catch |err| {
             if (!shouldRetryHttpPost(err, attempt)) return err;
 
             logger.warn("httpPostForm: attempt={d}/{d} 失败 err={s}，{d}ms 后重试", .{
@@ -683,40 +561,34 @@ fn shouldRetryHttpPost(err: anyerror, attempt: u32) bool {
     return err == error.UnknownHostName;
 }
 
-fn httpPostForm(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, body: []const u8) ![]u8 {
+fn httpPostForm(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, body: []const u8, timeout_sec: u32) ![]u8 {
     // 使用 Zig 0.15.2+ fetch API POST 表单（稳定路径）
     logger.debug("httpPostForm: 使用 fetch API 发送 POST", .{});
     logger.debug("POST {s}", .{url});
 
-    // 使用 Allocating Writer 捕获响应
-    var allocating_writer = std.Io.Writer.Allocating.init(allocator);
-    defer allocating_writer.deinit();
-
     logger.debug("httpPostForm: 发送请求...", .{});
     const fetch_start = compat.nanoTimestamp();
-    _ = try client.fetch(.{
-        .location = .{ .url = url },
+    const response = try zhttp.fetchBytesWithTimeout(allocator, client, .{
+        .url = url,
         .method = .POST,
         .payload = body,
         .headers = .{
             .content_type = .{ .override = "application/x-www-form-urlencoded" },
-            .user_agent = .{ .override = "Zig-DDNS/1.0" },
         },
-        .response_writer = &allocating_writer.writer,
-    });
+        .user_agent = "Zig-DDNS/1.0",
+    }, @as(u64, timeout_sec) * std.time.ms_per_s, NETWORK_POLL_INTERVAL_MS);
+    errdefer allocator.free(response.body);
 
     const fetch_elapsed_ms = @divFloor(compat.nanoTimestamp() - fetch_start, std.time.ns_per_ms);
     logger.debug("httpPostForm: 请求完成，耗时 {d}ms，准备处理响应体", .{fetch_elapsed_ms});
-    const resp_buf = allocating_writer.writer.buffer[0..allocating_writer.writer.end];
+    const resp_buf = response.body;
 
-    logger.debug("post encoding gzip_magic={any}", .{isGzipMagic(resp_buf)});
-    if (isGzipMagic(resp_buf)) {
-        const unzipped = try gzipDecompress(allocator, resp_buf);
-        return unzipped;
+    logger.debug("post encoding gzip_magic={any}", .{zhttp.isGzipMagic(resp_buf)});
+    if (zhttp.isGzipMagic(resp_buf)) {
+        defer allocator.free(resp_buf);
+        return try zhttp.gzipDecompressAlloc(allocator, resp_buf);
     }
-    // 复制响应数据供调用方使用
-    const out = try allocator.dupe(u8, resp_buf);
-    return out;
+    return resp_buf;
 }
 
 // 打印 DNSPod 返回中的 status.code 与 status.message，若无法解析，打印前 200 字节作为诊断
@@ -732,7 +604,7 @@ fn printDnspodStatus(allocator: std.mem.Allocator, resp: []const u8) void {
         const m_end_rel = std.mem.indexOfScalar(u8, m_slice, '"') orelse 0;
         const code = c_slice[0..c_end_rel];
         const message_raw = m_slice[0..m_end_rel];
-        const decoded = unicodeUnescapeJson(allocator, message_raw) catch {
+        const decoded = zzig.json.unescapeJsonStringAlloc(allocator, message_raw) catch {
             logger.debug("dnspod status: code={s} message={s}", .{ code, message_raw });
             return;
         };
@@ -744,128 +616,20 @@ fn printDnspodStatus(allocator: std.mem.Allocator, resp: []const u8) void {
     logger.debug("dnspod status raw: {s}...", .{resp[0..max]});
 }
 
-// 将 JSON 字符串中的 \uXXXX 转义解码为 UTF-8。简单实现：只处理 \u 后跟 4 个十六进制。
-fn unicodeUnescapeJson(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-    try out.ensureTotalCapacityPrecise(allocator, s.len);
-    var i: usize = 0;
-    while (i < s.len) : (i += 1) {
-        if (s[i] == '\\' and i + 5 < s.len and s[i + 1] == 'u') {
-            const h0 = s[i + 2];
-            const h1 = s[i + 3];
-            const h2 = s[i + 4];
-            const h3 = s[i + 5];
-            const val = (hexVal(h0) << 12) | (hexVal(h1) << 8) | (hexVal(h2) << 4) | hexVal(h3);
-            // 只处理基本多文种平面 BMP（不合并代理对），足以覆盖中文提示
-            // 手动 UTF-8 编码（覆盖 0..0xFFFF 范围）
-            const cp: u21 = @as(u21, @intCast(val));
-            if (cp <= 0x7F) {
-                try out.append(allocator, @as(u8, @intCast(cp)));
-            } else if (cp <= 0x7FF) {
-                try out.append(allocator, 0xC0 | @as(u8, @intCast((cp >> 6) & 0x1F)));
-                try out.append(allocator, 0x80 | @as(u8, @intCast(cp & 0x3F)));
-            } else {
-                try out.append(allocator, 0xE0 | @as(u8, @intCast((cp >> 12) & 0x0F)));
-                try out.append(allocator, 0x80 | @as(u8, @intCast((cp >> 6) & 0x3F)));
-                try out.append(allocator, 0x80 | @as(u8, @intCast(cp & 0x3F)));
-            }
-            i += 5; // 跳过 \uXXXX
-        } else {
-            try out.append(allocator, s[i]);
-        }
-    }
-    return out.toOwnedSlice(allocator);
-}
-
-fn hexVal(c: u8) u21 {
-    return switch (c) {
-        '0'...'9' => @as(u21, c - '0'),
-        'a'...'f' => @as(u21, 10 + c - 'a'),
-        'A'...'F' => @as(u21, 10 + c - 'A'),
-        else => 0,
-    };
-}
-
-// isGzipMagic 已在上文定义，这里不重复定义
-fn isGzipMagic(buf: []const u8) bool {
-    return buf.len >= 2 and buf[0] == 0x1F and buf[1] == 0x8B;
-}
-
-// x-www-form-urlencoded 编码（最小实现）
-fn urlFormEncode(allocator: std.mem.Allocator, s: []const u8) ![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-    try out.ensureTotalCapacityPrecise(allocator, s.len + s.len / 4);
-    const HEX = "0123456789ABCDEF";
-    for (s) |c| switch (c) {
-        'A'...'Z', 'a'...'z', '0'...'9', '-', '_', '.', '~' => try out.append(allocator, c),
-        ' ' => try out.appendSlice(allocator, "%20"),
-        else => {
-            try out.append(allocator, '%');
-            try out.append(allocator, HEX[(c >> 4) & 0xF]);
-            try out.append(allocator, HEX[c & 0xF]);
-        },
-    };
-    return out.toOwnedSlice(allocator);
-}
-
 // 构造 application/x-www-form-urlencoded 表单体
 fn allocFormEncoded(allocator: std.mem.Allocator, fields: []const struct { key: []const u8, v1: []const u8, v2: []const u8 }) ![]u8 {
-    var parts: std.ArrayList([]const u8) = .empty;
-    defer parts.deinit(allocator);
+    var encoded_fields: std.ArrayList(zhttp.FormField) = .empty;
+    defer encoded_fields.deinit(allocator);
+
     for (fields) |f| {
         if (std.mem.eql(u8, f.key, "login_token")) {
-            const a = try urlFormEncode(allocator, f.v1);
-            defer allocator.free(a);
-            const b = try urlFormEncode(allocator, f.v2);
-            defer allocator.free(b);
-            const token = try std.fmt.allocPrint(allocator, "{s},{s}", .{ a, b });
+            const token = try std.fmt.allocPrint(allocator, "{s},{s}", .{ f.v1, f.v2 });
             defer allocator.free(token);
-            const key = try urlFormEncode(allocator, f.key);
-            defer allocator.free(key);
-            const kv = try std.fmt.allocPrint(allocator, "{s}={s}", .{ key, token });
-            try parts.append(allocator, kv);
+            try encoded_fields.append(allocator, .{ .key = f.key, .value = token });
         } else if (f.v1.len != 0) {
-            const key = try urlFormEncode(allocator, f.key);
-            defer allocator.free(key);
-            const val = try urlFormEncode(allocator, f.v1);
-            defer allocator.free(val);
-            const kv = try std.fmt.allocPrint(allocator, "{s}={s}", .{ key, val });
-            try parts.append(allocator, kv);
+            try encoded_fields.append(allocator, .{ .key = f.key, .value = f.v1 });
         }
     }
-    const joined = try std.mem.join(allocator, "&", parts.items);
-    for (parts.items) |p| allocator.free(p);
-    return joined;
-}
 
-/// 使用 Zig 标准库解压 gzip 数据（基于 std.compress.flate）
-/// 参数:
-///   - allocator: 内存分配器
-///   - compressed: gzip 压缩数据
-/// 返回: 解压后的数据（调用方负责释放）
-fn gzipDecompress(allocator: std.mem.Allocator, compressed: []const u8) ![]u8 {
-    // 使用固定缓冲区创建 Io.Reader
-    var input_reader: std.Io.Reader = .fixed(compressed);
-
-    // 初始化 flate 解压缩器，指定为 gzip 容器格式
-    // 空切片表示使用内部分配的历史窗口
-    var decompressor = std.compress.flate.Decompress.init(&input_reader, .gzip, &.{});
-
-    // 使用 Writer.Allocating 收集解压后的数据
-    var output: std.Io.Writer.Allocating = .init(allocator);
-    errdefer output.deinit();
-
-    // 流式解压所有数据
-    _ = try decompressor.reader.streamRemaining(&output.writer);
-
-    // 检查解压过程中的错误
-    if (decompressor.err) |err| {
-        output.deinit();
-        return err;
-    }
-
-    // 转换为拥有的切片并返回
-    return try output.toOwnedSlice();
+    return zhttp.buildFormUrlEncoded(allocator, encoded_fields.items);
 }
