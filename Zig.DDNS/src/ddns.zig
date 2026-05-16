@@ -199,8 +199,8 @@ fn runOnce(allocator: std.mem.Allocator, config: Config) !void {
     defer client.deinit();
 
     // 使用超时保护执行网络请求
-    logger.debug("→ runOnce: 调用 fetchPublicIPv4WithTimeout...", .{});
-    const ip = fetchPublicIPv4WithTimeout(allocator, &client, config.ip_source_url, NETWORK_TIMEOUT_SEC) catch |err| {
+    logger.debug("→ runOnce: 调用 fetchPublicIPv4...", .{});
+    const ip = fetchPublicIPv4(allocator, &client, config.ip_source_url, NETWORK_TIMEOUT_SEC) catch |err| {
         logger.err("✗ runOnce: 获取 IP 失败 - {s}", .{@errorName(err)});
         return err;
     };
@@ -224,72 +224,18 @@ fn runOnce(allocator: std.mem.Allocator, config: Config) !void {
     logger.info("✓ runOnce: DNS 更新完成", .{});
 }
 
-/// 带超时保护的获取公网 IP
-fn fetchPublicIPv4WithTimeout(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, timeout_sec: u32) ![]u8 {
-    return fetchPublicIPv4WithRetry(allocator, client, url, timeout_sec);
-}
-
-fn fetchPublicIPv4WithRetry(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, timeout_sec: u32) ![]u8 {
-    return fetchPublicIPv4(allocator, client, url, timeout_sec);
-}
-
 fn fetchPublicIPv4(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, timeout_sec: u32) ![]u8 {
     logger.debug("fetchPublicIPv4: 准备发起请求", .{});
     logger.debug("POST {s} (form: from=hlktech-nuget)", .{url});
 
-    const body = try zhttpenh.fetchPublicIPv4WithRetry(allocator, client, url, .{
+    const ip = try zhttpenh.fetchPublicIPv4AddressWithRetry(allocator, client, url, .{
         .max_attempts = HTTP_POST_MAX_ATTEMPTS,
         .retry_delay_ms = HTTP_POST_RETRY_DELAY_MS,
         .timeout_sec = timeout_sec,
         .poll_interval_ms = NETWORK_POLL_INTERVAL_MS,
     });
-    defer allocator.free(body);
-
-    logger.debug("ip-source raw: {s}", .{body});
-    return extractPublicIPv4(allocator, body);
-}
-
-fn extractPublicIPv4(allocator: std.mem.Allocator, body: []const u8) ![]u8 {
-    logger.debug("fetchPublicIPv4: 解析 JSON 提取 IP", .{});
-
-    return zzig.json.quickGetStringFromArray(allocator, body, .{
-        .array_key = "Data",
-        .match_key = "Type",
-        .match_value = "IPv4",
-        .target_key = "Ip",
-    }) catch |err| switch (err) {
-        error.KeyNotFound, error.ElementNotFound, error.TypeMismatch => blk: {
-            const ip_field = try zzig.json.quickGetStringFromArray(allocator, body, .{
-                .match_key = "Type",
-                .match_value = "IPv4",
-                .target_key = "Ip",
-            });
-            logger.debug("fetchPublicIPv4: 完成，IP = {s}", .{ip_field});
-            break :blk ip_field;
-        },
-        else => err,
-    };
-}
-
-fn runReadCmd(allocator: std.mem.Allocator, exe: []const u8, args: []const []const u8) ![]u8 {
-    var argv = try allocator.alloc([]const u8, 1 + args.len);
-    defer allocator.free(argv);
-    argv[0] = exe;
-    for (args, 0..) |a, i| argv[i + 1] = a;
-    const res = try std.process.Child.run(.{
-        .allocator = allocator,
-        .argv = argv,
-    });
-    switch (res.term) {
-        .Exited => |code| {
-            if (code != 0) return error.ProcessFailed;
-        },
-        else => return error.ProcessFailed,
-    }
-    const trimmed = std.mem.trim(u8, res.stdout, " \r\n\t");
-    const out = try allocator.dupe(u8, trimmed);
-    allocator.free(res.stdout);
-    return out;
+    logger.debug("fetchPublicIPv4: 完成，IP = {s}", .{ip});
+    return ip;
 }
 
 const providers = struct {
@@ -357,8 +303,7 @@ const providers = struct {
             } else {
                 logger.info("dnspod: {s}.{s} 无变化 (ip={s}, ttl={d})", .{ sub_domain, domain, ip, r.ttl });
             }
-            allocator.free(r.id);
-            allocator.free(r.value);
+            freeDnsPodRecord(allocator, &r);
         }
     }
 
@@ -367,6 +312,11 @@ const providers = struct {
         value: []const u8,
         ttl: u32,
     };
+
+    fn freeDnsPodRecord(allocator: std.mem.Allocator, record: *const DnsPodRecord) void {
+        allocator.free(record.id);
+        allocator.free(record.value);
+    }
 
     fn dnspod_find_record(allocator: std.mem.Allocator, client: *std.http.Client, dp: DnsPodConfig, domain: []const u8, sub: []const u8, rtype: []const u8) !?DnsPodRecord {
         // POST https://dnsapi.cn/Record.List
@@ -381,58 +331,38 @@ const providers = struct {
         defer allocator.free(body);
         logger.debug("dnspod Record.List - domain={s} sub_domain={s} type={s}", .{ domain, sub, rtype });
 
-        const resp = try httpPostFormWithTimeout(allocator, client, "https://dnsapi.cn/Record.List", body, NETWORK_TIMEOUT_SEC);
+        const resp = try httpPostFormWithRetry(allocator, client, "https://dnsapi.cn/Record.List", body, NETWORK_TIMEOUT_SEC);
         defer allocator.free(resp);
         // 打印接口原始 JSON（完整）
         logger.debug("dnspod response: {s}", .{resp});
         printDnspodStatus(allocator, resp);
-        // 更严格的解析：限定在 records 数组第一条记录的对象范围内查找 id/value，避免误命中其他位置
-        const recs_key = "\"records\":[";
-        const recs_start = std.mem.indexOf(u8, resp, recs_key) orelse return null;
-        const after_recs = resp[recs_start + recs_key.len ..];
-        const first_obj_start_rel = std.mem.indexOfScalar(u8, after_recs, '{') orelse return null;
-        const obj_slice = after_recs[first_obj_start_rel..];
-        // 找到与之匹配的第一个对象的结束位置（简易括号计数）
-        var depth: i32 = 0;
-        var end_rel: ?usize = null;
-        for (obj_slice, 0..) |ch, i| {
-            if (ch == '{') depth += 1;
-            if (ch == '}') {
-                depth -= 1;
-                if (depth == 0) {
-                    end_rel = i;
-                    break;
-                }
-            }
-        }
-        const first_obj = if (end_rel) |e| obj_slice[0..(e + 1)] else return null;
-        const id_key = "\"id\":\"";
-        const value_key = "\"value\":\"";
-        const ttl_key = "\"ttl\":\"";
-
-        const id_start_rel = std.mem.indexOf(u8, first_obj, id_key) orelse return null;
-        const id_slice = first_obj[id_start_rel + id_key.len ..];
-        const id_rel_end = std.mem.indexOfScalar(u8, id_slice, '"') orelse return null;
-        const id_val = id_slice[0..id_rel_end];
-
-        const val_start_rel = std.mem.indexOf(u8, first_obj, value_key) orelse return null;
-        const val_slice = first_obj[val_start_rel + value_key.len ..];
-        const val_rel_end = std.mem.indexOfScalar(u8, val_slice, '"') orelse return null;
-        const value_val = val_slice[0..val_rel_end];
-
-        // 提取 TTL 值
-        const ttl_val: u32 = blk: {
-            const ttl_start_rel = std.mem.indexOf(u8, first_obj, ttl_key) orelse break :blk 600; // 默认 600
-            const ttl_slice = first_obj[ttl_start_rel + ttl_key.len ..];
-            const ttl_rel_end = std.mem.indexOfScalar(u8, ttl_slice, '"') orelse break :blk 600;
-            const ttl_str = ttl_slice[0..ttl_rel_end];
-            break :blk std.fmt.parseInt(u32, ttl_str, 10) catch 600;
+        const query = zzig.json.JsonQuery.init(allocator, resp);
+        const records = query.getArray("records") catch |err| switch (err) {
+            error.KeyNotFound => return null,
+            else => return err,
+        };
+        const first = records.getObjectAt(0) catch |err| switch (err) {
+            error.ElementNotFound => return null,
+            else => return err,
         };
 
-        // 复制切片，避免释放 resp 后悬挂
-        const id_copy = try allocator.dupe(u8, id_val);
-        const val_copy = try allocator.dupe(u8, value_val);
-        return DnsPodRecord{ .id = id_copy, .value = val_copy, .ttl = ttl_val };
+        var record = DnsPodRecord{
+            .id = try first.getString("id"),
+            .value = undefined,
+            .ttl = 600,
+        };
+        errdefer allocator.free(record.id);
+
+        record.value = try first.getString("value");
+        errdefer freeDnsPodRecord(allocator, &record);
+
+        const ttl_str = first.getString("ttl") catch null;
+        if (ttl_str) |ttl| {
+            defer allocator.free(ttl);
+            record.ttl = std.fmt.parseInt(u32, ttl, 10) catch 600;
+        }
+
+        return record;
     }
 
     fn dnspod_create_record(allocator: std.mem.Allocator, client: *std.http.Client, dp: DnsPodConfig, domain: []const u8, sub: []const u8, rtype: []const u8, ip: []const u8, cfg: Config) !void {
@@ -452,7 +382,7 @@ const providers = struct {
         });
         defer allocator.free(body);
         logger.debug("dnspod Record.Create - domain={s} sub={s} type={s} value={s}", .{ domain, sub, rtype, ip });
-        const resp = try httpPostFormWithTimeout(allocator, client, "https://dnsapi.cn/Record.Create", body, NETWORK_TIMEOUT_SEC);
+        const resp = try httpPostFormWithRetry(allocator, client, "https://dnsapi.cn/Record.Create", body, NETWORK_TIMEOUT_SEC);
         defer allocator.free(resp);
         logger.debug("dnspod response: {s}", .{resp});
         printDnspodStatus(allocator, resp);
@@ -478,18 +408,13 @@ const providers = struct {
         });
         defer allocator.free(body);
         logger.debug("dnspod Record.Modify - id={s} domain={s} sub={s} type={s} new_value={s}", .{ record_id, domain, sub, rtype, ip });
-        const resp = try httpPostFormWithTimeout(allocator, client, "https://dnsapi.cn/Record.Modify", body, NETWORK_TIMEOUT_SEC);
+        const resp = try httpPostFormWithRetry(allocator, client, "https://dnsapi.cn/Record.Modify", body, NETWORK_TIMEOUT_SEC);
         defer allocator.free(resp);
         logger.debug("dnspod response: {s}", .{resp});
         printDnspodStatus(allocator, resp);
         if (std.mem.indexOf(u8, resp, "\"code\":\"1\"") == null) return error.ApiFailed;
     }
 };
-
-/// 带超时保护的 POST 请求
-fn httpPostFormWithTimeout(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, body: []const u8, timeout_sec: u32) ![]u8 {
-    return httpPostFormWithRetry(allocator, client, url, body, timeout_sec);
-}
 
 fn httpPostFormWithRetry(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, body: []const u8, timeout_sec: u32) ![]u8 {
     logger.debug("httpPostForm: 使用 ZZig.HttpEnhanced 发送 POST", .{});
@@ -501,12 +426,6 @@ fn httpPostFormWithRetry(allocator: std.mem.Allocator, client: *std.http.Client,
         .timeout_sec = timeout_sec,
         .poll_interval_ms = NETWORK_POLL_INTERVAL_MS,
     });
-}
-
-fn shouldRetryHttpPost(err: anyerror, attempt: u32) bool {
-    if (attempt >= HTTP_POST_MAX_ATTEMPTS) return false;
-
-    return err == error.UnknownHostName;
 }
 
 // 打印 DNSPod 返回中的 status.code 与 status.message，若无法解析，打印前 200 字节作为诊断
