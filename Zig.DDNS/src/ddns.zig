@@ -199,10 +199,10 @@ fn runOnce(allocator: std.mem.Allocator, config: Config) !void {
     defer client.deinit();
 
     // 使用超时保护执行网络请求
-    logger.debug("→ runOnce: 调用 ZZig.HttpEnhanced 获取公网 IP...", .{});
+    logger.debug("→ runOnce: 调用应用侧公网 IP 解析...", .{});
     logger.debug("fetchPublicIPv4: 准备发起请求", .{});
     logger.debug("POST {s} (form: from=hlktech-nuget)", .{config.ip_source_url});
-    const ip = zhttpenh.fetchPublicIPv4AddressWithRetry(allocator, &client, config.ip_source_url, .{
+    const ip = fetchPublicIPv4AddressWithRetry(allocator, &client, config.ip_source_url, .{
         .max_attempts = HTTP_POST_MAX_ATTEMPTS,
         .retry_delay_ms = HTTP_POST_RETRY_DELAY_MS,
         .timeout_sec = NETWORK_TIMEOUT_SEC,
@@ -230,6 +230,35 @@ fn runOnce(allocator: std.mem.Allocator, config: Config) !void {
         },
     }
     logger.info("✓ runOnce: DNS 更新完成", .{});
+}
+
+// 公网 IP 查询服务的返回格式由具体平台决定，解析逻辑保留在应用侧。
+fn fetchPublicIPv4AddressWithRetry(
+    allocator: std.mem.Allocator,
+    client: *std.http.Client,
+    url: []const u8,
+    config: zhttpenh.RetryConfig,
+) ![]u8 {
+    const body = try zhttpenh.httpPostFormWithRetry(allocator, client, url, "from=hlktech-nuget", config);
+    defer allocator.free(body);
+
+    return extractPublicIPv4FromJson(allocator, body);
+}
+
+fn extractPublicIPv4FromJson(allocator: std.mem.Allocator, body: []const u8) ![]u8 {
+    return zzig.json.quickGetStringFromArray(allocator, body, .{
+        .array_key = "Data",
+        .match_key = "Type",
+        .match_value = "IPv4",
+        .target_key = "Ip",
+    }) catch |err| switch (err) {
+        error.KeyNotFound, error.ElementNotFound, error.TypeMismatch => zzig.json.quickGetStringFromArray(allocator, body, .{
+            .match_key = "Type",
+            .match_value = "IPv4",
+            .target_key = "Ip",
+        }),
+        else => err,
+    };
 }
 
 const providers = struct {
@@ -335,8 +364,7 @@ const providers = struct {
             .poll_interval_ms = NETWORK_POLL_INTERVAL_MS,
         });
         defer allocator.free(resp);
-        // 打印接口原始 JSON（完整）
-        logger.debug("dnspod response: {s}", .{resp});
+        logger.debug("dnspod response bytes: {d}", .{resp.len});
         printDnspodStatus(allocator, resp);
         const query = zzig.json.JsonQuery.init(allocator, resp);
         const records = query.getArray("records") catch |err| switch (err) {
@@ -394,7 +422,7 @@ const providers = struct {
             .poll_interval_ms = NETWORK_POLL_INTERVAL_MS,
         });
         defer allocator.free(resp);
-        logger.debug("dnspod response: {s}", .{resp});
+        logger.debug("dnspod response bytes: {d}", .{resp.len});
         printDnspodStatus(allocator, resp);
         // 可加入状态检查，这里简化为成功只要返回中包含 "code":"1"
         if (std.mem.indexOf(u8, resp, "\"code\":\"1\"") == null) return error.ApiFailed;
@@ -428,7 +456,7 @@ const providers = struct {
             .poll_interval_ms = NETWORK_POLL_INTERVAL_MS,
         });
         defer allocator.free(resp);
-        logger.debug("dnspod response: {s}", .{resp});
+        logger.debug("dnspod response bytes: {d}", .{resp.len});
         printDnspodStatus(allocator, resp);
         if (std.mem.indexOf(u8, resp, "\"code\":\"1\"") == null) return error.ApiFailed;
     }
@@ -447,14 +475,24 @@ fn printDnspodStatus(allocator: std.mem.Allocator, resp: []const u8) void {
         const m_end_rel = std.mem.indexOfScalar(u8, m_slice, '"') orelse 0;
         const code = c_slice[0..c_end_rel];
         const message_raw = m_slice[0..m_end_rel];
+        const code_copy = allocator.dupe(u8, code) catch {
+            logger.debug("dnspod status: code_len={d} message_len={d}", .{ code.len, message_raw.len });
+            return;
+        };
+        defer allocator.free(code_copy);
+
         const decoded = zzig.json.unescapeJsonStringAlloc(allocator, message_raw) catch {
-            logger.debug("dnspod status: code={s} message={s}", .{ code, message_raw });
+            const message_copy = allocator.dupe(u8, message_raw) catch {
+                logger.debug("dnspod status: code={s} message_len={d}", .{ code_copy, message_raw.len });
+                return;
+            };
+            defer allocator.free(message_copy);
+            logger.debug("dnspod status: code={s} message={s}", .{ code_copy, message_copy });
             return;
         };
         defer allocator.free(decoded);
-        logger.debug("dnspod status: code={s} message={s}", .{ code, decoded });
+        logger.debug("dnspod status: code={s} message={s}", .{ code_copy, decoded });
         return;
     };
-    const max = if (resp.len > 200) 200 else resp.len;
-    logger.debug("dnspod status raw: {s}...", .{resp[0..max]});
+    logger.debug("dnspod status raw bytes: {d}", .{resp.len});
 }
