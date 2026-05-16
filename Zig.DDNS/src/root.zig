@@ -3,7 +3,7 @@ const std = @import("std");
 
 pub const zzig = @import("zzig");
 pub const ddns = @import("ddns.zig");
-pub const logger = @import("logger.zig");
+pub const logger = zzig.Logger;
 
 /// 重新导出配置类型，方便主程序使用
 pub const Config = ddns.Config;

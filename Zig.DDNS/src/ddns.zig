@@ -1,8 +1,9 @@
 const std = @import("std");
 const zzig = @import("zzig");
 const compat = zzig.compat;
+const zhttp = zzig.Http;
 const zhttpenh = zzig.HttpEnhanced;
-const logger = @import("logger.zig");
+const logger = zzig.Logger;
 
 pub const Provider = enum {
     dnspod,
@@ -261,6 +262,46 @@ fn extractPublicIPv4FromJson(allocator: std.mem.Allocator, body: []const u8) ![]
     };
 }
 
+const DnsPodFormField = struct {
+    key: []const u8,
+    v1: []const u8,
+    v2: []const u8 = "",
+};
+
+fn buildDnsPodFormEncoded(allocator: std.mem.Allocator, fields: []const DnsPodFormField) ![]u8 {
+    var parts: std.ArrayList([]const u8) = .empty;
+    defer parts.deinit(allocator);
+
+    for (fields) |field| {
+        if (std.mem.eql(u8, field.key, "login_token")) {
+            const key = try zhttp.percentEncodeFormComponent(allocator, field.key);
+            defer allocator.free(key);
+
+            const token_id = try zhttp.percentEncodeFormComponent(allocator, field.v1);
+            defer allocator.free(token_id);
+
+            const token = try zhttp.percentEncodeFormComponent(allocator, field.v2);
+            defer allocator.free(token);
+
+            const part = try std.fmt.allocPrint(allocator, "{s}={s},{s}", .{ key, token_id, token });
+            try parts.append(allocator, part);
+        } else if (field.v1.len != 0) {
+            const key = try zhttp.percentEncodeFormComponent(allocator, field.key);
+            defer allocator.free(key);
+
+            const value = try zhttp.percentEncodeFormComponent(allocator, field.v1);
+            defer allocator.free(value);
+
+            const part = try std.fmt.allocPrint(allocator, "{s}={s}", .{ key, value });
+            try parts.append(allocator, part);
+        }
+    }
+
+    const joined = try std.mem.join(allocator, "&", parts.items);
+    for (parts.items) |part| allocator.free(part);
+    return joined;
+}
+
 const providers = struct {
     /// DNSPod 更新逻辑：遍历配置中的所有子域名，逐一检查并更新 DNS 记录
     /// 每个子域名独立处理，单个失败不影响其他子域名
@@ -344,14 +385,14 @@ const providers = struct {
     fn dnspod_find_record(allocator: std.mem.Allocator, client: *std.http.Client, dp: DnsPodConfig, domain: []const u8, sub: []const u8, rtype: []const u8) !?DnsPodRecord {
         // POST https://dnsapi.cn/Record.List
         // params: login_token, format=json, domain, sub_domain, record_type
-        const fields = [_]zhttpenh.FormField{
+        const fields = [_]DnsPodFormField{
             .{ .key = "login_token", .v1 = dp.token_id, .v2 = dp.token },
             .{ .key = "format", .v1 = "json", .v2 = "" },
             .{ .key = "domain", .v1 = domain, .v2 = "" },
             .{ .key = "sub_domain", .v1 = sub, .v2 = "" },
             .{ .key = "record_type", .v1 = rtype, .v2 = "" },
         };
-        const body = try zhttpenh.buildFormEncoded(allocator, &fields);
+        const body = try buildDnsPodFormEncoded(allocator, &fields);
         defer allocator.free(body);
         logger.debug("dnspod Record.List - domain={s} sub_domain={s} type={s}", .{ domain, sub, rtype });
 
@@ -400,7 +441,7 @@ const providers = struct {
         const ttl_str = try std.fmt.allocPrint(allocator, "{d}", .{dp.ttl});
         defer allocator.free(ttl_str);
 
-        const fields = [_]zhttpenh.FormField{
+        const fields = [_]DnsPodFormField{
             .{ .key = "login_token", .v1 = dp.token_id, .v2 = dp.token },
             .{ .key = "format", .v1 = "json", .v2 = "" },
             .{ .key = "domain", .v1 = domain, .v2 = "" },
@@ -410,7 +451,7 @@ const providers = struct {
             .{ .key = "value", .v1 = ip, .v2 = "" },
             .{ .key = "ttl", .v1 = ttl_str, .v2 = "" },
         };
-        const body = try zhttpenh.buildFormEncoded(allocator, &fields);
+        const body = try buildDnsPodFormEncoded(allocator, &fields);
         defer allocator.free(body);
         logger.debug("dnspod Record.Create - domain={s} sub={s} type={s} value={s}", .{ domain, sub, rtype, ip });
         logger.debug("httpPostForm: 使用 ZZig.HttpEnhanced 发送 POST", .{});
@@ -433,7 +474,7 @@ const providers = struct {
         const ttl_str = try std.fmt.allocPrint(allocator, "{d}", .{dp.ttl});
         defer allocator.free(ttl_str);
 
-        const fields = [_]zhttpenh.FormField{
+        const fields = [_]DnsPodFormField{
             .{ .key = "login_token", .v1 = dp.token_id, .v2 = dp.token },
             .{ .key = "format", .v1 = "json", .v2 = "" },
             .{ .key = "domain", .v1 = domain, .v2 = "" },
@@ -444,7 +485,7 @@ const providers = struct {
             .{ .key = "value", .v1 = ip, .v2 = "" },
             .{ .key = "ttl", .v1 = ttl_str, .v2 = "" },
         };
-        const body = try zhttpenh.buildFormEncoded(allocator, &fields);
+        const body = try buildDnsPodFormEncoded(allocator, &fields);
         defer allocator.free(body);
         logger.debug("dnspod Record.Modify - id={s} domain={s} sub={s} type={s} new_value={s}", .{ record_id, domain, sub, rtype, ip });
         logger.debug("httpPostForm: 使用 ZZig.HttpEnhanced 发送 POST", .{});
@@ -495,4 +536,18 @@ fn printDnspodStatus(allocator: std.mem.Allocator, resp: []const u8) void {
         return;
     };
     logger.debug("dnspod status raw bytes: {d}", .{resp.len});
+}
+ 
+test "buildDnsPodFormEncoded preserves raw comma in login_token" {
+    const allocator = std.testing.allocator;
+
+    const fields = [_]DnsPodFormField{
+        .{ .key = "login_token", .v1 = "123456", .v2 = "abcdef" },
+        .{ .key = "format", .v1 = "json" },
+    };
+
+    const body = try buildDnsPodFormEncoded(allocator, &fields);
+    defer allocator.free(body);
+
+    try std.testing.expectEqualStrings("login_token=123456,abcdef&format=json", body);
 }
