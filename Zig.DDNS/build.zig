@@ -30,6 +30,8 @@ pub fn build(b: *std.Build) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
+    const release_min = optimize != .Debug;
+    const install_probe = b.option(bool, "install-probe", "Install auxiliary NetProbe executable") orelse !release_min;
     // It's also possible to define more custom flags to toggle optional features
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
@@ -58,6 +60,9 @@ pub fn build(b: *std.Build) void {
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
+        .optimize = optimize,
+        .strip = release_min,
+        .omit_frame_pointer = release_min,
         .imports = &.{
             .{ .name = "zzig", .module = zzig.module("zzig") },
         },
@@ -92,6 +97,8 @@ pub fn build(b: *std.Build) void {
             // definition if desireable (e.g. firmware for embedded devices).
             .target = target,
             .optimize = optimize,
+            .strip = release_min,
+            .omit_frame_pointer = release_min,
             // List of modules available for import in source files part of the
             // root module.
             .imports = &.{
@@ -111,6 +118,8 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("src/net_probe.zig"),
             .target = target,
             .optimize = optimize,
+            .strip = release_min,
+            .omit_frame_pointer = release_min,
             .imports = &.{
                 .{ .name = "zzig", .module = zzig.module("zzig") },
             },
@@ -122,7 +131,7 @@ pub fn build(b: *std.Build) void {
     // step). By default the install prefix is `zig-out/` but can be overridden
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
-    b.installArtifact(probe_exe);
+    if (install_probe) b.installArtifact(probe_exe);
 
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
@@ -153,7 +162,6 @@ pub fn build(b: *std.Build) void {
     const probe_step = b.step("probe", "Run the network probe");
     const probe_cmd = b.addRunArtifact(probe_exe);
     probe_step.dependOn(&probe_cmd.step);
-    probe_cmd.step.dependOn(b.getInstallStep());
 
     if (b.args) |args| {
         probe_cmd.addArgs(args);

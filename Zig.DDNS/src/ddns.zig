@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zzig = @import("zzig");
 const compat = zzig.compat;
 const zhttp = zzig.Http;
@@ -55,9 +56,16 @@ fn currentIo() std.Io {
 }
 
 pub fn run(config: Config) !void {
-    var gpa = std.heap.DebugAllocator(.{}).init;
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    if (builtin.mode == .Debug) {
+        var gpa = std.heap.DebugAllocator(.{}).init;
+        defer _ = gpa.deinit();
+        return runWithAllocator(gpa.allocator(), config);
+    }
+
+    return runWithAllocator(std.heap.page_allocator, config);
+}
+
+fn runWithAllocator(allocator: std.mem.Allocator, config: Config) !void {
 
     logger.info("🚀 程序启动 - 更新周期: {d}秒", .{config.interval_sec});
     runtime_stats.last_success_time = compat.timestamp();
@@ -342,7 +350,7 @@ const providers = struct {
 
     /// 单个子域名的 DNS 记录更新：查找 → 创建/修改
     fn dnspod_update_single(allocator: std.mem.Allocator, client: *std.http.Client, dp: DnsPodConfig, domain: []const u8, sub_domain: []const u8, config: Config, ip: []const u8) !void {
-        const record = try dnspod_find_record(allocator, client, dp, domain, sub_domain, config.record_type);
+        const record = try dnspod_find_record(allocator, client, dp, domain, sub_domain, config.record_type, ip);
         if (record == null) {
             logger.info("dnspod: 未找到现有记录，将创建 {s}.{s} -> {s} (TTL={d})", .{ sub_domain, domain, ip, dp.ttl });
             try dnspod_create_record(allocator, client, dp, domain, sub_domain, config.record_type, ip, config);
@@ -382,19 +390,20 @@ const providers = struct {
         allocator.free(record.value);
     }
 
-    fn dnspod_find_record(allocator: std.mem.Allocator, client: *std.http.Client, dp: DnsPodConfig, domain: []const u8, sub: []const u8, rtype: []const u8) !?DnsPodRecord {
+    fn dnspod_find_record(allocator: std.mem.Allocator, client: *std.http.Client, dp: DnsPodConfig, domain: []const u8, sub: []const u8, rtype: []const u8, desired_ip: []const u8) !?DnsPodRecord {
         // POST https://dnsapi.cn/Record.List
-        // params: login_token, format=json, domain, sub_domain, record_type
+        // params: login_token, format=json, domain, sub_domain, record_type, record_line
         const fields = [_]DnsPodFormField{
             .{ .key = "login_token", .v1 = dp.token_id, .v2 = dp.token },
             .{ .key = "format", .v1 = "json", .v2 = "" },
             .{ .key = "domain", .v1 = domain, .v2 = "" },
             .{ .key = "sub_domain", .v1 = sub, .v2 = "" },
             .{ .key = "record_type", .v1 = rtype, .v2 = "" },
+            .{ .key = "record_line", .v1 = dp.line, .v2 = "" },
         };
         const body = try buildDnsPodFormEncoded(allocator, &fields);
         defer allocator.free(body);
-        logger.debug("dnspod Record.List - domain={s} sub_domain={s} type={s}", .{ domain, sub, rtype });
+        logger.debug("dnspod Record.List - domain={s} sub_domain={s} type={s} line={s}", .{ domain, sub, rtype, dp.line });
 
         logger.debug("httpPostForm: 使用 ZZig.HttpEnhanced 发送 POST", .{});
         logger.debug("POST {s}", .{"https://dnsapi.cn/Record.List"});
@@ -412,28 +421,45 @@ const providers = struct {
             error.KeyNotFound => return null,
             else => return err,
         };
-        const first = records.getObjectAt(0) catch |err| switch (err) {
-            error.ElementNotFound => return null,
-            else => return err,
-        };
+        var fallback: ?DnsPodRecord = null;
+        errdefer if (fallback) |record| freeDnsPodRecord(allocator, &record);
 
-        var record = DnsPodRecord{
-            .id = try first.getString("id"),
-            .value = undefined,
-            .ttl = 600,
-        };
-        errdefer allocator.free(record.id);
+        var index: usize = 0;
+        while (true) : (index += 1) {
+            const item = records.getObjectAt(index) catch |err| switch (err) {
+                error.ElementNotFound => break,
+                else => return err,
+            };
 
-        record.value = try first.getString("value");
-        errdefer freeDnsPodRecord(allocator, &record);
+            var record = DnsPodRecord{
+                .id = try item.getString("id"),
+                .value = undefined,
+                .ttl = 600,
+            };
+            errdefer allocator.free(record.id);
 
-        const ttl_str = first.getString("ttl") catch null;
-        if (ttl_str) |ttl| {
-            defer allocator.free(ttl);
-            record.ttl = std.fmt.parseInt(u32, ttl, 10) catch 600;
+            record.value = try item.getString("value");
+            errdefer freeDnsPodRecord(allocator, &record);
+
+            const ttl_str = item.getString("ttl") catch null;
+            if (ttl_str) |ttl| {
+                defer allocator.free(ttl);
+                record.ttl = std.fmt.parseInt(u32, ttl, 10) catch 600;
+            }
+
+            if (std.mem.eql(u8, record.value, desired_ip)) {
+                if (fallback) |chosen| freeDnsPodRecord(allocator, &chosen);
+                return record;
+            }
+
+            if (fallback == null) {
+                fallback = record;
+            } else {
+                freeDnsPodRecord(allocator, &record);
+            }
         }
 
-        return record;
+        return fallback;
     }
 
     fn dnspod_create_record(allocator: std.mem.Allocator, client: *std.http.Client, dp: DnsPodConfig, domain: []const u8, sub: []const u8, rtype: []const u8, ip: []const u8, cfg: Config) !void {
