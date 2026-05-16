@@ -38,7 +38,6 @@ const RuntimeStats = struct {
     success_count: u64 = 0,
     error_count: u64 = 0,
     consecutive_errors: u32 = 0,
-    active_threads: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
     last_success_time: i64 = 0,
     mutex: zzig.compat.Mutex = .{},
 };
@@ -85,17 +84,15 @@ pub fn run(config: Config) !void {
                 .success = runtime_stats.success_count,
                 .errors = runtime_stats.error_count,
                 .consecutive = runtime_stats.consecutive_errors,
-                .threads = runtime_stats.active_threads.load(.monotonic),
                 .last_success = now - runtime_stats.last_success_time,
             };
             runtime_stats.mutex.unlock();
 
-            logger.info("💓 心跳 #({d}) - 成功:{d} 错误:{d} 连续错误:{d} 活动线程:{d} 距上次成功:{d}秒", .{
+            logger.info("💓 心跳 #({d}) - 成功:{d} 错误:{d} 连续错误:{d} 距上次成功:{d}秒", .{
                 stats.cycle,
                 stats.success,
                 stats.errors,
                 stats.consecutive,
-                stats.threads,
                 stats.last_success,
             });
             last_heartbeat = now;
@@ -188,18 +185,22 @@ pub fn run(config: Config) !void {
 }
 
 /// 网络操作超时时间（秒）
-/// 这是应用层超时，用于防止网络请求无响应导致程序卡住
-/// 当超时发生时，主线程会放弃等待并继续，工作线程会被 detach
-/// 注意：工作线程最终会因 HTTP 客户端内部超时或 TCP 超时而结束，不会真正泄漏
+/// 这是应用层超时，用于通过 std.Io 的取消机制中止长时间卡住的网络请求
 const NETWORK_TIMEOUT_SEC = 5;
+const NETWORK_POLL_INTERVAL_MS: u64 = 100;
+const HTTP_POST_MAX_ATTEMPTS: u32 = 2;
+const HTTP_POST_RETRY_DELAY_MS: u64 = 200;
 
 /// 带超时保护的执行单次更新
 fn runOnce(allocator: std.mem.Allocator, config: Config) !void {
     logger.info("→ runOnce: 开始执行 (超时: {d}秒)", .{NETWORK_TIMEOUT_SEC});
 
+    var client = std.http.Client{ .allocator = allocator, .io = currentIo() };
+    defer client.deinit();
+
     // 使用超时保护执行网络请求
     logger.debug("→ runOnce: 调用 fetchPublicIPv4WithTimeout...", .{});
-    const ip = fetchPublicIPv4WithTimeout(allocator, config.ip_source_url, NETWORK_TIMEOUT_SEC) catch |err| {
+    const ip = fetchPublicIPv4WithTimeout(allocator, &client, config.ip_source_url, NETWORK_TIMEOUT_SEC) catch |err| {
         logger.err("✗ runOnce: 获取 IP 失败 - {s}", .{@errorName(err)});
         return err;
     };
@@ -209,7 +210,7 @@ fn runOnce(allocator: std.mem.Allocator, config: Config) !void {
     logger.debug("→ runOnce: 开始更新 DNS 记录 (provider={s})", .{@tagName(config.provider)});
     switch (config.provider) {
         .dnspod => {
-            providers.dnspod_update(allocator, config, ip) catch |err| {
+            providers.dnspod_update(allocator, &client, config, ip) catch |err| {
                 if (err == error.PartialUpdateFailure) {
                     // 部分子域名更新失败，记录警告但不中断
                     logger.warn("⚠ runOnce: 部分子域名更新失败", .{});
@@ -223,102 +224,99 @@ fn runOnce(allocator: std.mem.Allocator, config: Config) !void {
     logger.info("✓ runOnce: DNS 更新完成", .{});
 }
 
-/// 带超时的网络请求结果
-const FetchResult = struct {
+/// 带超时的字节结果
+const BytesRequestResult = struct {
     data: ?[]u8 = null,
     err: ?anyerror = null,
     completed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    mutex: zzig.compat.Mutex = .{},
 };
 
 /// 带超时保护的获取公网 IP
-fn fetchPublicIPv4WithTimeout(allocator: std.mem.Allocator, url: []const u8, timeout_sec: u32) ![]u8 {
-    var result = FetchResult{};
+fn fetchPublicIPv4WithTimeout(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, timeout_sec: u32) ![]u8 {
+    const io = client.io;
+    var result = BytesRequestResult{};
+    var future = io.concurrent(fetchWorker, .{ allocator, client, url, &result }) catch |err| switch (err) {
+        error.ConcurrencyUnavailable => {
+            logger.warn("fetchPublicIPv4: 当前 IO 不支持可取消并发，回退到同步请求", .{});
+            return fetchPublicIPv4WithRetry(allocator, client, url);
+        },
+    };
 
-    // 记录活动线程数
-    _ = runtime_stats.active_threads.fetchAdd(1, .monotonic);
-
-    // 创建工作线程执行实际的网络请求
-    const thread = try std.Thread.spawn(.{}, fetchWorker, .{ allocator, url, &result });
-
-    // 主线程等待超时
     const timeout_ns = @as(u64, timeout_sec) * std.time.ns_per_s;
     const start_time = compat.nanoTimestamp();
 
     while (true) {
-        // 检查是否完成
         if (result.completed.load(.acquire)) {
-            logger.debug("[主线程] 检测到工作线程完成，准备 join", .{});
-            thread.join();
-            // 注意：不在这里减少线程计数，worker 的 defer 会负责减少
-            logger.debug("[主线程] 线程已 join，检查结果", .{});
-
-            result.mutex.lock();
-            defer result.mutex.unlock();
+            _ = future.await(io);
 
             if (result.err) |err| {
-                logger.debug("[主线程] 工作线程返回错误: {s}", .{@errorName(err)});
                 if (result.data) |data| allocator.free(data);
                 return err;
             }
 
             if (result.data) |data| {
-                logger.debug("[主线程] 成功获取数据，长度: {d}", .{data.len});
                 return data;
             }
 
-            logger.err("[主线程] 工作线程既无数据也无错误！", .{});
             return error.UnknownError;
         }
 
-        // 检查是否超时
         const elapsed = compat.nanoTimestamp() - start_time;
         if (elapsed >= timeout_ns) {
-            const active = runtime_stats.active_threads.load(.monotonic);
-            logger.warn("⏱️ 网络请求超时 ({d}秒)，放弃等待 [活动线程:{d}]", .{ timeout_sec, active });
-            // 线程会在后台完成或超时，不detach避免资源泄漏
-            // 让线程自然结束，通过 completed 标志可以知道它何时完成
-            thread.detach();
-            // 注意：线程计数不减少，因为线程仍在运行
-            // 当线程实际完成时，会在 fetchWorker 中减少计数
+            _ = future.cancel(io);
+            if (result.data) |data| {
+                allocator.free(data);
+                result.data = null;
+            }
+            logger.warn("⏱️ 网络请求超时 ({d}秒)，已取消 - {s}", .{ timeout_sec, url });
             return error.RequestTimeout;
         }
 
-        // 短暂睡眠避免忙等待
-        compat.sleep(100 * std.time.ns_per_ms);
+        compat.sleep(NETWORK_POLL_INTERVAL_MS * std.time.ns_per_ms);
     }
 }
 
-/// 工作线程：执行实际的网络请求
-fn fetchWorker(allocator: std.mem.Allocator, url: []const u8, result: *FetchResult) void {
-    logger.debug("[工作线程] fetchWorker: 启动", .{});
+/// 可取消任务：执行实际的公网 IP 请求
+fn fetchWorker(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, result: *BytesRequestResult) void {
     defer {
-        logger.debug("[工作线程] fetchWorker: 设置 completed=true", .{});
         result.completed.store(true, .release);
-        const remaining = runtime_stats.active_threads.fetchSub(1, .monotonic);
-        logger.debug("[工作线程] fetchWorker: 结束 (剩余活动线程:{d})", .{remaining - 1});
     }
 
-    const ip = fetchPublicIPv4(allocator, url) catch |err| {
-        logger.warn("[工作线程] fetchPublicIPv4 失败: {s}", .{@errorName(err)});
-        result.mutex.lock();
-        defer result.mutex.unlock();
+    const ip = fetchPublicIPv4WithRetry(allocator, client, url) catch |err| {
         result.err = err;
         return;
     };
 
-    logger.debug("[工作线程] fetchWorker: 成功获取 IP，设置 result.data", .{});
-    result.mutex.lock();
-    defer result.mutex.unlock();
     result.data = ip;
-    logger.debug("[工作线程] fetchWorker: result.data 已设置", .{});
 }
 
-fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
+fn fetchPublicIPv4WithRetry(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8) ![]u8 {
+    var attempt: u32 = 1;
+
+    while (true) {
+        const ip = fetchPublicIPv4(allocator, client, url) catch |err| {
+            if (!shouldRetryHttpPost(err, attempt)) return err;
+
+            logger.warn("fetchPublicIPv4: attempt={d}/{d} 失败 err={s}，{d}ms 后重试", .{
+                attempt,
+                HTTP_POST_MAX_ATTEMPTS,
+                @errorName(err),
+                HTTP_POST_RETRY_DELAY_MS,
+            });
+            compat.sleep(HTTP_POST_RETRY_DELAY_MS * std.time.ns_per_ms);
+            attempt += 1;
+            continue;
+        };
+
+        if (attempt > 1) {
+            logger.info("fetchPublicIPv4: attempt={d}/{d} 重试成功", .{ attempt, HTTP_POST_MAX_ATTEMPTS });
+        }
+        return ip;
+    }
+}
+
+fn fetchPublicIPv4(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8) ![]u8 {
     logger.debug("fetchPublicIPv4: 准备发起请求", .{});
-    // 使用 Zig 0.15.2+ fetch API（已验证可用）
-    var client = std.http.Client{ .allocator = allocator, .io = currentIo() };
-    defer client.deinit();
 
     logger.debug("POST {s} (form: from=hlktech-nuget)", .{url});
 
@@ -330,6 +328,7 @@ fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
     defer allocating_writer.deinit();
 
     logger.debug("fetchPublicIPv4: 发送请求...", .{});
+    const fetch_start = compat.nanoTimestamp();
     _ = try client.fetch(.{
         .location = .{ .url = url },
         .method = .POST,
@@ -340,7 +339,8 @@ fn fetchPublicIPv4(allocator: std.mem.Allocator, url: []const u8) ![]u8 {
         .response_writer = &allocating_writer.writer,
     });
 
-    logger.debug("fetchPublicIPv4: 读取响应体", .{});
+    const fetch_elapsed_ms = @divFloor(compat.nanoTimestamp() - fetch_start, std.time.ns_per_ms);
+    logger.debug("fetchPublicIPv4: 请求完成，耗时 {d}ms，准备处理响应体", .{fetch_elapsed_ms});
     // 从 Allocating Writer 获取响应体
     const body = allocating_writer.writer.buffer[0..allocating_writer.writer.end];
 
@@ -402,7 +402,7 @@ fn runReadCmd(allocator: std.mem.Allocator, exe: []const u8, args: []const []con
 const providers = struct {
     /// DNSPod 更新逻辑：遍历配置中的所有子域名，逐一检查并更新 DNS 记录
     /// 每个子域名独立处理，单个失败不影响其他子域名
-    pub fn dnspod_update(allocator: std.mem.Allocator, config: Config, ip: []const u8) !void {
+    pub fn dnspod_update(allocator: std.mem.Allocator, client: *std.http.Client, config: Config, ip: []const u8) !void {
         if (config.dnspod == null) return error.MissingProviderConfig;
         const dp = config.dnspod.?;
 
@@ -428,7 +428,7 @@ const providers = struct {
                 logger.info("dnspod: 处理子域名 [{d}/{d}]: {s}.{s}", .{ i + 1, config.sub_domains.len, sub_domain, config.domain });
             }
 
-            dnspod_update_single(allocator, dp, config.domain, sub_domain, config, ip) catch |err| {
+            dnspod_update_single(allocator, client, dp, config.domain, sub_domain, config, ip) catch |err| {
                 logger.err("dnspod: 更新 {s}.{s} 失败 - {s}", .{ sub_domain, config.domain, @errorName(err) });
                 had_error = true;
             };
@@ -438,11 +438,11 @@ const providers = struct {
     }
 
     /// 单个子域名的 DNS 记录更新：查找 → 创建/修改
-    fn dnspod_update_single(allocator: std.mem.Allocator, dp: DnsPodConfig, domain: []const u8, sub_domain: []const u8, config: Config, ip: []const u8) !void {
-        const record = try dnspod_find_record(allocator, dp, domain, sub_domain, config.record_type);
+    fn dnspod_update_single(allocator: std.mem.Allocator, client: *std.http.Client, dp: DnsPodConfig, domain: []const u8, sub_domain: []const u8, config: Config, ip: []const u8) !void {
+        const record = try dnspod_find_record(allocator, client, dp, domain, sub_domain, config.record_type);
         if (record == null) {
             logger.info("dnspod: 未找到现有记录，将创建 {s}.{s} -> {s} (TTL={d})", .{ sub_domain, domain, ip, dp.ttl });
-            try dnspod_create_record(allocator, dp, domain, sub_domain, config.record_type, ip, config);
+            try dnspod_create_record(allocator, client, dp, domain, sub_domain, config.record_type, ip, config);
             logger.info("dnspod: 已创建记录 {s}.{s} -> {s} (TTL={d})", .{ sub_domain, domain, ip, dp.ttl });
         } else {
             const r = record.?;
@@ -459,7 +459,7 @@ const providers = struct {
                 } else {
                     logger.info("dnspod: 检测到 TTL 变化 - {d} -> {d} → 将更新", .{ r.ttl, dp.ttl });
                 }
-                try dnspod_modify_record(allocator, dp, r.id, domain, sub_domain, config.record_type, ip, config);
+                try dnspod_modify_record(allocator, client, dp, r.id, domain, sub_domain, config.record_type, ip, config);
                 logger.info("dnspod: 已更新记录 {s}.{s} -> {s} (TTL={d})", .{ sub_domain, domain, ip, dp.ttl });
             } else {
                 logger.info("dnspod: {s}.{s} 无变化 (ip={s}, ttl={d})", .{ sub_domain, domain, ip, r.ttl });
@@ -475,7 +475,7 @@ const providers = struct {
         ttl: u32,
     };
 
-    fn dnspod_find_record(allocator: std.mem.Allocator, dp: DnsPodConfig, domain: []const u8, sub: []const u8, rtype: []const u8) !?DnsPodRecord {
+    fn dnspod_find_record(allocator: std.mem.Allocator, client: *std.http.Client, dp: DnsPodConfig, domain: []const u8, sub: []const u8, rtype: []const u8) !?DnsPodRecord {
         // POST https://dnsapi.cn/Record.List
         // params: login_token, format=json, domain, sub_domain, record_type
         const body = try allocFormEncoded(allocator, &.{
@@ -488,7 +488,7 @@ const providers = struct {
         defer allocator.free(body);
         logger.debug("dnspod Record.List - domain={s} sub_domain={s} type={s}", .{ domain, sub, rtype });
 
-        const resp = try httpPostFormWithTimeout(allocator, "https://dnsapi.cn/Record.List", body, NETWORK_TIMEOUT_SEC);
+        const resp = try httpPostFormWithTimeout(allocator, client, "https://dnsapi.cn/Record.List", body, NETWORK_TIMEOUT_SEC);
         defer allocator.free(resp);
         // 打印接口原始 JSON（完整）
         logger.debug("dnspod response: {s}", .{resp});
@@ -542,7 +542,7 @@ const providers = struct {
         return DnsPodRecord{ .id = id_copy, .value = val_copy, .ttl = ttl_val };
     }
 
-    fn dnspod_create_record(allocator: std.mem.Allocator, dp: DnsPodConfig, domain: []const u8, sub: []const u8, rtype: []const u8, ip: []const u8, cfg: Config) !void {
+    fn dnspod_create_record(allocator: std.mem.Allocator, client: *std.http.Client, dp: DnsPodConfig, domain: []const u8, sub: []const u8, rtype: []const u8, ip: []const u8, cfg: Config) !void {
         // 将 TTL 转换为字符串
         const ttl_str = try std.fmt.allocPrint(allocator, "{d}", .{dp.ttl});
         defer allocator.free(ttl_str);
@@ -559,7 +559,7 @@ const providers = struct {
         });
         defer allocator.free(body);
         logger.debug("dnspod Record.Create - domain={s} sub={s} type={s} value={s}", .{ domain, sub, rtype, ip });
-        const resp = try httpPostFormWithTimeout(allocator, "https://dnsapi.cn/Record.Create", body, NETWORK_TIMEOUT_SEC);
+        const resp = try httpPostFormWithTimeout(allocator, client, "https://dnsapi.cn/Record.Create", body, NETWORK_TIMEOUT_SEC);
         defer allocator.free(resp);
         logger.debug("dnspod response: {s}", .{resp});
         printDnspodStatus(allocator, resp);
@@ -567,7 +567,7 @@ const providers = struct {
         if (std.mem.indexOf(u8, resp, "\"code\":\"1\"") == null) return error.ApiFailed;
     }
 
-    fn dnspod_modify_record(allocator: std.mem.Allocator, dp: DnsPodConfig, record_id: []const u8, domain: []const u8, sub: []const u8, rtype: []const u8, ip: []const u8, cfg: Config) !void {
+    fn dnspod_modify_record(allocator: std.mem.Allocator, client: *std.http.Client, dp: DnsPodConfig, record_id: []const u8, domain: []const u8, sub: []const u8, rtype: []const u8, ip: []const u8, cfg: Config) !void {
         // 将 TTL 转换为字符串
         const ttl_str = try std.fmt.allocPrint(allocator, "{d}", .{dp.ttl});
         defer allocator.free(ttl_str);
@@ -585,7 +585,7 @@ const providers = struct {
         });
         defer allocator.free(body);
         logger.debug("dnspod Record.Modify - id={s} domain={s} sub={s} type={s} new_value={s}", .{ record_id, domain, sub, rtype, ip });
-        const resp = try httpPostFormWithTimeout(allocator, "https://dnsapi.cn/Record.Modify", body, NETWORK_TIMEOUT_SEC);
+        const resp = try httpPostFormWithTimeout(allocator, client, "https://dnsapi.cn/Record.Modify", body, NETWORK_TIMEOUT_SEC);
         defer allocator.free(resp);
         logger.debug("dnspod response: {s}", .{resp});
         printDnspodStatus(allocator, resp);
@@ -593,31 +593,23 @@ const providers = struct {
     }
 };
 
-/// POST 请求工作线程结果
-const PostResult = struct {
-    data: ?[]u8 = null,
-    err: ?anyerror = null,
-    completed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    mutex: zzig.compat.Mutex = .{},
-};
-
 /// 带超时保护的 POST 请求
-fn httpPostFormWithTimeout(allocator: std.mem.Allocator, url: []const u8, body: []const u8, timeout_sec: u32) ![]u8 {
-    var result = PostResult{};
-
-    _ = runtime_stats.active_threads.fetchAdd(1, .monotonic);
-    const thread = try std.Thread.spawn(.{}, postWorker, .{ allocator, url, body, &result });
+fn httpPostFormWithTimeout(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, body: []const u8, timeout_sec: u32) ![]u8 {
+    const io = client.io;
+    var result = BytesRequestResult{};
+    var future = io.concurrent(postWorker, .{ allocator, client, url, body, &result }) catch |err| switch (err) {
+        error.ConcurrencyUnavailable => {
+            logger.warn("httpPostForm: 当前 IO 不支持可取消并发，回退到同步请求", .{});
+            return httpPostFormWithRetry(allocator, client, url, body);
+        },
+    };
 
     const timeout_ns = @as(u64, timeout_sec) * std.time.ns_per_s;
     const start_time = compat.nanoTimestamp();
 
     while (true) {
         if (result.completed.load(.acquire)) {
-            thread.join();
-            // 注意：不在这里减少线程计数，postWorker 的 defer 会负责减少
-
-            result.mutex.lock();
-            defer result.mutex.unlock();
+            _ = future.await(io);
 
             if (result.err) |err| {
                 if (result.data) |data| allocator.free(data);
@@ -633,48 +625,75 @@ fn httpPostFormWithTimeout(allocator: std.mem.Allocator, url: []const u8, body: 
 
         const elapsed = compat.nanoTimestamp() - start_time;
         if (elapsed >= timeout_ns) {
-            const active = runtime_stats.active_threads.load(.monotonic);
-            logger.warn("⏱️ POST 请求超时 ({d}秒)，放弃等待 [活动线程:{d}] - {s}", .{ timeout_sec, active, url });
-            thread.detach();
+            _ = future.cancel(io);
+            if (result.data) |data| {
+                allocator.free(data);
+                result.data = null;
+            }
+            logger.warn("⏱️ POST 请求超时 ({d}秒)，已取消 - {s}", .{ timeout_sec, url });
             return error.RequestTimeout;
         }
 
-        compat.sleep(100 * std.time.ns_per_ms);
+        compat.sleep(NETWORK_POLL_INTERVAL_MS * std.time.ns_per_ms);
     }
 }
 
-/// POST 工作线程
-fn postWorker(allocator: std.mem.Allocator, url: []const u8, body: []const u8, result: *PostResult) void {
+/// 可取消任务：执行实际的 POST 请求
+fn postWorker(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, body: []const u8, result: *BytesRequestResult) void {
     defer {
         result.completed.store(true, .release);
-        _ = runtime_stats.active_threads.fetchSub(1, .monotonic);
     }
 
-    const data = httpPostForm(allocator, url, body) catch |err| {
-        result.mutex.lock();
-        defer result.mutex.unlock();
+    const data = httpPostFormWithRetry(allocator, client, url, body) catch |err| {
         result.err = err;
         return;
     };
 
-    result.mutex.lock();
-    defer result.mutex.unlock();
     result.data = data;
 }
 
-fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8) ![]u8 {
+fn httpPostFormWithRetry(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, body: []const u8) ![]u8 {
+    var attempt: u32 = 1;
+
+    while (true) {
+        const data = httpPostForm(allocator, client, url, body) catch |err| {
+            if (!shouldRetryHttpPost(err, attempt)) return err;
+
+            logger.warn("httpPostForm: attempt={d}/{d} 失败 err={s}，{d}ms 后重试", .{
+                attempt,
+                HTTP_POST_MAX_ATTEMPTS,
+                @errorName(err),
+                HTTP_POST_RETRY_DELAY_MS,
+            });
+            compat.sleep(HTTP_POST_RETRY_DELAY_MS * std.time.ns_per_ms);
+            attempt += 1;
+            continue;
+        };
+
+        if (attempt > 1) {
+            logger.info("httpPostForm: attempt={d}/{d} 重试成功", .{ attempt, HTTP_POST_MAX_ATTEMPTS });
+        }
+        return data;
+    }
+}
+
+fn shouldRetryHttpPost(err: anyerror, attempt: u32) bool {
+    if (attempt >= HTTP_POST_MAX_ATTEMPTS) return false;
+
+    return err == error.UnknownHostName;
+}
+
+fn httpPostForm(allocator: std.mem.Allocator, client: *std.http.Client, url: []const u8, body: []const u8) ![]u8 {
     // 使用 Zig 0.15.2+ fetch API POST 表单（稳定路径）
     logger.debug("httpPostForm: 使用 fetch API 发送 POST", .{});
     logger.debug("POST {s}", .{url});
-
-    var client = std.http.Client{ .allocator = allocator, .io = currentIo() };
-    defer client.deinit();
 
     // 使用 Allocating Writer 捕获响应
     var allocating_writer = std.Io.Writer.Allocating.init(allocator);
     defer allocating_writer.deinit();
 
     logger.debug("httpPostForm: 发送请求...", .{});
+    const fetch_start = compat.nanoTimestamp();
     _ = try client.fetch(.{
         .location = .{ .url = url },
         .method = .POST,
@@ -686,7 +705,8 @@ fn httpPostForm(allocator: std.mem.Allocator, url: []const u8, body: []const u8)
         .response_writer = &allocating_writer.writer,
     });
 
-    logger.debug("httpPostForm: 读取响应体", .{});
+    const fetch_elapsed_ms = @divFloor(compat.nanoTimestamp() - fetch_start, std.time.ns_per_ms);
+    logger.debug("httpPostForm: 请求完成，耗时 {d}ms，准备处理响应体", .{fetch_elapsed_ms});
     const resp_buf = allocating_writer.writer.buffer[0..allocating_writer.writer.end];
 
     logger.debug("post encoding gzip_magic={any}", .{isGzipMagic(resp_buf)});
