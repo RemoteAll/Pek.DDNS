@@ -1,6 +1,6 @@
 # Zig.DDNS
 
-[![Zig Version](https://img.shields.io/badge/Zig-0.15.2+-orange.svg)](https://ziglang.org/)
+[![Zig Version](https://img.shields.io/badge/Zig-0.16.0+-orange.svg)](https://ziglang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 一个用 Zig 语言编写的高性能、可扩展 DDNS（动态域名解析）工具。当前实现了腾讯 DNSPod 的 DDNS 自动更新，后续可扩展支持 Cloudflare、阿里云 DNS、华为云等主流 DNS 服务商。
@@ -31,7 +31,7 @@
 
 - **Windows**：原生 UTF-8 支持，使用 Windows API 获取时区
 - **Linux/macOS**：POSIX 标准接口，完整跨平台兼容
-- **内置 HTTP 客户端**：基于 Zig 0.15.2+ 标准库，无外部依赖
+- **内置 HTTP 客户端**：基于 Zig 0.16.0+ 标准库，无外部依赖
 
 ### 🛠️ 扩展性
 
@@ -42,7 +42,7 @@
 
 ### 安装要求
 
-- Zig 0.15.2 及以上版本
+- Zig 0.16.0 及以上版本
 - Windows/Linux/macOS 任意平台
 - 推荐使用 VSCode + [Zig Language](https://marketplace.visualstudio.com/items?itemName=ziglang.vscode-zig) 插件
 
@@ -68,6 +68,63 @@ zig build -Doptimize=ReleaseSafe
 ```
 
 编译后的可执行文件位于 `zig-out/bin/Zig_DDNS.exe`（Windows）或 `zig-out/bin/Zig_DDNS`（Linux/macOS）。
+
+## 最小发布与 UPX 压缩
+
+如果目标是尽量减小分发体积，建议先生成 `ReleaseSmall`，再按需使用 UPX。
+
+### 1. 生成最小版
+
+```powershell
+zig build -Doptimize=ReleaseSmall --prefix zig-out-small
+```
+
+如果想直接一键完成构建、UPX 压缩和 zip 打包，可以直接执行：
+
+```powershell
+.\pack_upx.ps1
+```
+
+当前最小版输出位于：
+
+1. `zig-out-small\bin\Zig_DDNS.exe`
+2. `zig-out-small\bin\config.json`
+3. `release\Zig_DDNS-min-upx\Zig_DDNS.exe`
+4. `release\Zig_DDNS-min-upx\config.json`
+
+如果你需要单独整理发布目录，可以把这两个文件复制到自己的发布目录后再打包。
+
+### 2. 安装 UPX
+
+Windows 下可以任选一种方式安装：
+
+```powershell
+winget install --id UPX.UPX -e --accept-package-agreements --accept-source-agreements
+```
+
+或：
+
+```powershell
+choco install upx -y
+```
+
+### 3. 压缩最小版 exe
+
+建议先保留原始最小版，再复制一份单独压缩：
+
+```powershell
+New-Item -ItemType Directory -Force -Path .\release\Zig_DDNS-min-upx | Out-Null
+Copy-Item .\zig-out-small\bin\Zig_DDNS.exe .\release\Zig_DDNS-min-upx\Zig_DDNS.exe -Force
+Copy-Item .\zig-out-small\bin\config.json .\release\Zig_DDNS-min-upx\config.json -Force
+upx --best --lzma .\release\Zig_DDNS-min-upx\Zig_DDNS.exe
+Compress-Archive -Path .\release\Zig_DDNS-min-upx\* -DestinationPath .\release\Zig_DDNS-min-upx-win-x64.zip -Force
+```
+
+### 4. 使用建议
+
+1. `config.json` 不是可执行文件，不需要用 UPX 压缩
+2. 压缩后建议至少跑一次真实 DDNS 更新流程，确认日志、配置读取和 API 调用都正常
+3. 如果当前终端找不到 `upx`，重新打开终端再执行
 
 ### 配置 DNSPod Token
 
@@ -311,7 +368,7 @@ if (std.ascii.eqlIgnoreCase(provider_str, "cloudflare")) break :blk Provider.clo
 - 禁止删除已有代码注释
 - 保留逻辑分隔空行
 - 优先可读性，就近声明变量
-- 使用 Zig 0.15.2+ 标准 API，避免废弃接口
+- 使用 Zig 0.16.0+ 标准 API，避免废弃接口
 - 错误处理需明确类型，使用 `error union`
 - 提交前运行相关测试，确保编译通过
 
