@@ -33,7 +33,8 @@
     // internet connectivity.
     .dependencies = .{
         .zzig = .{
-            .path = "../../ZZig",
+            .url = "https://github.com/PeiKeSmart/zzig/archive/4191f16f2fec799427052c035b3766a9a8a4fa4a.tar.gz",
+            .hash = "zzig-0.0.2-LGNHoePwBgDFZV9m8jebzishLUn_A47AB3LBhk77vfvX",
         },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
