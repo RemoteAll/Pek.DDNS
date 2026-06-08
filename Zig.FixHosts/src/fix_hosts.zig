@@ -114,9 +114,27 @@ pub fn run() !void {
     };
     std.debug.print("   {s}✓{s} 完成\n", .{ Color.green, Color.reset });
 
+    // ── 步骤 4：验证连通性 ──
+    std.debug.print("\n{s}➜ 步骤 4/4：验证连通性...{s}\n", .{ Color.cyan, Color.reset });
+    const verify_ok = verifyReachability(allocator);
+    if (verify_ok) {
+        std.debug.print("   {s}✓{s} 请求成功 — {s}erp.hlktech.com:8099{s} 已可访问\n", .{
+            Color.green, Color.reset, Color.bold, Color.reset,
+        });
+    } else {
+        std.debug.print("   {s}✗{s} 请求失败 — {s}erp.hlktech.com:8099{s} 暂时无法连通\n", .{
+            Color.red, Color.reset, Color.yellow, Color.reset,
+        });
+        std.debug.print("   可能是服务端未就绪或网络策略限制，请稍后手动验证\n", .{});
+    }
+
     // ── 输出结果摘要 ──
     std.debug.print("\n{s}────────────────────────────────────────{s}\n", .{ Color.green, Color.reset });
-    std.debug.print("{s}✓ 执行成功！{s}\n", .{ Color.green, Color.reset });
+    if (verify_ok) {
+        std.debug.print("{s}✓ 全部完成！{s}\n", .{ Color.green, Color.reset });
+    } else {
+        std.debug.print("{s}⚠ 部分完成（hosts 已更新，但连通验证未通过）{s}\n", .{ Color.yellow, Color.reset });
+    }
     std.debug.print("  {s}域名:{s}  {s}.{s}\n", .{ Color.yellow, Color.reset, TARGET_SUB_DOMAIN, TARGET_DOMAIN });
     std.debug.print("  {s}IP:{s}    {s}{s}{s}\n", .{ Color.yellow, Color.reset, Color.bold, dnspod_ip, Color.reset });
     if (result.changed) {
@@ -125,6 +143,44 @@ pub fn run() !void {
         std.debug.print("  {s}状态:{s}  hosts 无需变更\n", .{ Color.yellow, Color.reset });
     }
     std.debug.print("{s}────────────────────────────────────────{s}\n", .{ Color.green, Color.reset });
+}
+
+/// 验证 erp.hlktech.com:8099/ERP/ 是否可访问
+fn verifyReachability(allocator: std.mem.Allocator) bool {
+    const url = "http://erp.hlktech.com:8099/ERP/";
+
+    std.debug.print("   请求 {s}...\n", .{url});
+
+    var client = std.http.Client{ .allocator = allocator };
+    defer client.deinit();
+
+    var allocating_writer = std.Io.Writer.Allocating.init(allocator);
+    defer allocating_writer.deinit();
+
+    const result = client.fetch(.{
+        .location = .{ .url = url },
+        .method = .GET,
+        .response_writer = &allocating_writer.writer,
+    }) catch |err| {
+        std.debug.print("   连接失败: {s}\n", .{@errorName(err)});
+        return false;
+    };
+
+    const status_code = @intFromEnum(result.status);
+    std.debug.print("   HTTP 状态码: {d}\n", .{status_code});
+
+    // 2xx 或 3xx 都算连通成功
+    if (status_code >= 200 and status_code < 400) {
+        return true;
+    }
+
+    // 4xx/5xx 说明服务端有响应但可能有问题，仍算连通
+    if (status_code >= 400) {
+        std.debug.print("   服务端返回 {d}，但服务本身已可达\n", .{status_code});
+        return true;
+    }
+
+    return false;
 }
 
 /// 解析 DNSPod API 返回的 JSON，提取 records 数组中第一条记录的 value 字段
