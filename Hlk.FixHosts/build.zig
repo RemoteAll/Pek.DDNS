@@ -9,7 +9,7 @@ pub fn build(b: *std.Build) void {
     const manifest_content =
         \\<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
         \\<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-        \\  <assemblyIdentity version="1.0.0.0" name="Zig_FixHosts"/>
+        \\  <assemblyIdentity version="1.0.0.0" name="Hlk_FixHosts"/>
         \\  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
         \\    <security>
         \\      <requestedPrivileges>
@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
     const manifest_path = wf.add("require_admin.manifest", manifest_content);
 
     const exe = b.addExecutable(.{
-        .name = "Zig_FixHosts",
+        .name = "Hlk_FixHosts",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -34,7 +34,7 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(exe);
 
-    const run_step = b.step("run", "运行 Zig_FixHosts");
+    const run_step = b.step("run", "运行 Hlk_FixHosts");
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
     run_cmd.step.dependOn(b.getInstallStep());

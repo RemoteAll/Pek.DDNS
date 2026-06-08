@@ -46,7 +46,7 @@ pub fn run() !void {
     const allocator = gpa.allocator();
 
     std.debug.print("{s}────────────────────────────────────────{s}\n", .{ Color.cyan, Color.reset });
-    std.debug.print("{s}{s}  Zig.FixHosts — DNSPod → Hosts 更新工具{s}\n", .{ Color.bold, Color.cyan, Color.reset });
+    std.debug.print("{s}{s}  Hlk.FixHosts — DNSPod → Hosts 更新工具{s}\n", .{ Color.bold, Color.cyan, Color.reset });
     std.debug.print("{s}────────────────────────────────────────{s}\n", .{ Color.cyan, Color.reset });
     std.debug.print("\n", .{});
 
