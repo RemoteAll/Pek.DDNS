@@ -1,0 +1,16 @@
+# ── Zig 编译产物 ──
+zig-out/
+.zig-cache/
+
+# ── 本地密钥配置（包含真实 API Token，严禁提交！） ──
+local.secret.zig
+
+# ── Windows 系统文件 ──
+Thumbs.db
+Desktop.ini
+
+# ── IDE ──
+.vscode/
+.idea/
+*.swp
+*.swo
