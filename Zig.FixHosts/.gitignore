@@ -3,7 +3,7 @@ zig-out/
 .zig-cache/
 
 # ── 本地密钥配置（包含真实 API Token，严禁提交！） ──
-local.secret.zig
+src/local.secret.zig
 
 # ── Windows 系统文件 ──
 Thumbs.db
