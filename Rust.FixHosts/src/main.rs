@@ -123,6 +123,16 @@ fn main() {
         eprintln!("\n[错误] 执行失败: {}", e);
     }
 
+    // 按 Enter 退出前清理 hosts 条目（窗口关闭/系统关机由控制台处理器处理）
+    if hosts::CLEANUP_NEEDED.load(std::sync::atomic::Ordering::SeqCst) {
+        match hosts::remove_host_entry("erp.hlktech.com") {
+            Ok(true) => println!("\nhosts 条目已清理"),
+            Ok(false) => {}
+            Err(_) => {}
+        }
+        let _ = hosts::flush_dns();
+    }
+
     // 正常退出前等待用户按键（避免双击时窗口一闪而过）
     wait_for_key_press();
 }

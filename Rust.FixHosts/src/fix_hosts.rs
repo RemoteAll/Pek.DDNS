@@ -80,7 +80,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // ── 步骤 1：通过 DNSPod API 查询记录 IP ──
-    println!("{}➜ 步骤 1/6：查询 DNSPod 记录...{}", CYAN, RESET);
+    println!("{}➜ 步骤 1/4：查询 DNSPod 记录...{}", CYAN, RESET);
     println!("   域名: {}{}.{}{}", YELLOW, TARGET_SUB_DOMAIN, TARGET_DOMAIN, RESET);
     println!("   类型: {}{}{}", YELLOW, RECORD_TYPE, RESET);
 
@@ -103,7 +103,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 步骤 2：临时更新 hosts 文件 ──
     println!();
-    println!("{}➜ 步骤 2/6：临时写入 hosts 文件...{}", CYAN, RESET);
+    println!("{}➜ 步骤 2/4：临时写入 hosts 文件...{}", CYAN, RESET);
 
     let full_domain = format!("{}.{}", TARGET_SUB_DOMAIN, TARGET_DOMAIN);
 
@@ -131,7 +131,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 步骤 3：刷新 DNS 缓存 ──
     println!();
-    println!("{}➜ 步骤 3/6：刷新 DNS 缓存...{}", CYAN, RESET);
+    println!("{}➜ 步骤 3/4：刷新 DNS 缓存...{}", CYAN, RESET);
     match hosts::flush_dns() {
         Ok(()) => {
             println!("   {}✓{} 完成", GREEN, RESET);
@@ -141,13 +141,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // ── 步骤 4：验证连通性（带 hosts 条目） ──
+    // ── 步骤 4：验证连通性 ──
     println!();
-    println!("{}➜ 步骤 4/6：验证连通性（通过 hosts）...{}", CYAN, RESET);
+    println!("{}➜ 步骤 4/4：验证连通性...{}", CYAN, RESET);
     let verify_with_hosts = verify_reachability();
     if verify_with_hosts {
         println!(
-            "   {}✓{} 请求成功 — {}{}:8099{} 已可访问（通过 hosts 指向）",
+            "   {}✓{} 请求成功 — {}{}:8099{} 已可访问",
             GREEN, RESET, BOLD, full_domain, RESET
         );
     } else {
@@ -158,75 +158,21 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("   可能是服务端未就绪或网络策略限制");
     }
 
-    // ── 步骤 5：清理 hosts 中写入的条目 ──
-    println!();
-    println!("{}➜ 步骤 5/6：清理 hosts 临时条目...{}", CYAN, RESET);
-    match hosts::remove_host_entry(&full_domain) {
-        Ok(true) => {
-            println!("   {}✓{} hosts 条目已清理，恢复原状", GREEN, RESET);
-            // 清理完成，撤销清理标记
-            hosts::CLEANUP_NEEDED.store(false, Ordering::SeqCst);
-        }
-        Ok(false) => {
-            println!("   {}✓{} hosts 无需清理（未找到相关条目）", GREEN, RESET);
-            hosts::CLEANUP_NEEDED.store(false, Ordering::SeqCst);
-        }
-        Err(e) => {
-            println!("   {}[警告]{} 清理 hosts 失败: {}", YELLOW, RESET, e);
-        }
-    }
-
-    // ── 刷新 DNS 缓存 ──
-    match hosts::flush_dns() {
-        Ok(()) => {
-            println!("   {}✓{} DNS 缓存已刷新", GREEN, RESET);
-        }
-        Err(e) => {
-            println!("   {}[警告]{} 刷新 DNS 缓存失败: {}", YELLOW, RESET, e);
-        }
-    }
-
-    // ── 步骤 6：验证连通性（纯 DNS 解析） ──
-    println!();
-    println!("{}➜ 步骤 6/6：验证连通性（通过 DNS 解析）...{}", CYAN, RESET);
-    let verify_with_dns = verify_reachability();
-    if verify_with_dns {
-        println!(
-            "   {}✓{} 请求成功 — {}{}:8099{} 已可访问（通过 DNS 解析）",
-            GREEN, RESET, BOLD, full_domain, RESET
-        );
-    } else {
-        println!(
-            "   {}✗{} 请求失败 — {}{}:8099{} DNS 解析暂时无法连通",
-            RED, RESET, YELLOW, full_domain, RESET
-        );
-        println!("   可能是 DNS 解析未生效或服务端尚未就绪");
-    }
-
     // ── 输出结果摘要 ──
     println!();
     println!("{}{}{}", GREEN, "────────────────────────────────────────", RESET);
-    let all_ok = verify_with_hosts && verify_with_dns;
-    if all_ok {
-        println!("{}✓ 全部完成！hosts 已清理，DNS 解析正常{}", GREEN, RESET);
-    } else if verify_with_hosts {
-        println!("{}⚠ 部分完成（hosts 指向可达，但 DNS 解析暂未生效）{}", YELLOW, RESET);
+    if verify_with_hosts {
+        println!("{}✓ 全部完成！({} 已加入 hosts，退出时会自动清理){}", GREEN, full_domain, RESET);
     } else {
-        println!("{}✗ 服务暂时不可达（hosts 指向和 DNS 解析均失败）{}", RED, RESET);
+        println!("{}✗ 服务暂时不可达{}", RED, RESET);
     }
     println!("  {}域名:{}  {}.{}", YELLOW, RESET, TARGET_SUB_DOMAIN, TARGET_DOMAIN);
     println!("  {}IP:{}    {}{}{}", YELLOW, RESET, BOLD, dnspod_ip, RESET);
-    if verify_with_hosts {
-        println!("  {}hosts 指向:{}  ✓ 可达", YELLOW, RESET);
+    if result.changed {
+        println!("  {}hosts:{}   已写入（关闭窗口/系统关机时自动清理）", YELLOW, RESET);
     } else {
-        println!("  {}hosts 指向:{}  ✗ 不可达", YELLOW, RESET);
+        println!("  {}hosts:{}   无需变更", YELLOW, RESET);
     }
-    if verify_with_dns {
-        println!("  {}DNS 解析:{}    ✓ 可达", YELLOW, RESET);
-    } else {
-        println!("  {}DNS 解析:{}    ✗ 不可达（需等待 DNS 生效）", YELLOW, RESET);
-    }
-    println!("  {}hosts 文件:{}  已清理，无残留", YELLOW, RESET);
     println!("{}{}{}", GREEN, "────────────────────────────────────────", RESET);
 
     Ok(())
