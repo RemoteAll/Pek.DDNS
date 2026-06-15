@@ -5,6 +5,10 @@
 
 use std::fs;
 use std::process::Command;
+use std::sync::atomic::AtomicBool;
+
+/// 标记当前是否已修改 hosts 且尚未清理（供控制台事件处理器使用）
+pub static CLEANUP_NEEDED: AtomicBool = AtomicBool::new(false);
 
 /// Hosts 文件路径（仅 Windows）
 const HOSTS_PATH: &str = "C:\\Windows\\System32\\drivers\\etc\\hosts";
@@ -170,6 +174,58 @@ pub fn update_host_entry(domain: &str, new_ip: &str) -> Result<HostsResult, Stri
     }
 }
 
+/// 从 hosts 文件中移除指定域名的条目
+/// 返回 true 表示实际移除了条目，false 表示未找到对应条目
+pub fn remove_host_entry(domain: &str) -> Result<bool, String> {
+    let content = match fs::read_to_string(HOSTS_PATH) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err("无法访问 hosts 文件，请以管理员身份运行本程序！".to_string());
+        }
+        Err(e) => return Err(format!("读取 hosts 文件失败: {}", e)),
+    };
+
+    // 查找域名所在的行并移除
+    let mut new_lines = String::with_capacity(content.len());
+    let mut found = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim_end_matches('\r');
+
+        // 检查这行是否包含目标域名（非注释行）
+        let is_target = trimmed.contains(domain)
+            && !trimmed.trim_start().starts_with('#')
+            && {
+                let trimmed_left = trimmed.trim_start();
+                // 行首是 IP（含点号）
+                let ip_end = trimmed_left.find(|c: char| c == ' ' || c == '\t').unwrap_or(usize::MAX);
+                ip_end < domain.len() + 20 // 粗略判断是 hosts 条目而非巧合
+            };
+
+        if is_target {
+            found = true;
+            // 跳过此行（不追加到 new_lines）
+            continue;
+        }
+
+        new_lines.push_str(trimmed);
+        new_lines.push('\n');
+    }
+
+    if found {
+        fs::write(HOSTS_PATH, &new_lines).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                "无法写入 hosts 文件，请以管理员身份运行本程序！".to_string()
+            } else {
+                format!("写入 hosts 文件失败: {}", e)
+            }
+        })?;
+    }
+
+    Ok(found)
+}
+
 /// 执行 ipconfig /flushdns 刷新系统 DNS 缓存
 pub fn flush_dns() -> Result<(), String> {
     #[cfg(not(target_os = "windows"))]
@@ -197,3 +253,5 @@ pub fn flush_dns() -> Result<(), String> {
         Ok(())
     }
 }
+
+

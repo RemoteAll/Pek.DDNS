@@ -1,5 +1,5 @@
 [package]
-name = "Hlk_FixHosts"
+name = "hlk-rfixhosts"
 version = "1.0.0"
 edition = "2021"
 description = "通过 DNSPod API 查询域名 IP 并更新本地 hosts 文件"
@@ -13,5 +13,5 @@ serde_json = "1"
 winres = "0.1"
 
 [[bin]]
-name = "Hlk_FixHosts"
+name = "hlk-rfixhosts"
 path = "src/main.rs"

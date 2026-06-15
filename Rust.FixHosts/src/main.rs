@@ -1,4 +1,4 @@
-//! Rust.FixHosts — 通过 DNSPod API 查询域名 IP 并更新本地 hosts 文件
+//! Hlk.RFixHosts — 通过 DNSPod API 查询域名 IP 并更新本地 hosts 文件
 //!
 //! 通过嵌入的 Windows 清单声明 requireAdministrator，
 //! Windows 会在启动前自动弹出 UAC 提权，无需代码动态处理。
@@ -12,6 +12,44 @@ mod hosts;
 mod secret;
 
 use std::io::{self, Read};
+
+// ═══════════════════════════════════════════════════════════════
+// 控制台事件处理器：捕获窗口关闭/系统关机时清理 hosts
+// ═══════════════════════════════════════════════════════════════
+
+/// Windows 控制台事件处理器
+/// CTRL_CLOSE_EVENT(2) — 点击关闭按钮时触发
+/// CTRL_SHUTDOWN_EVENT(6) — 系统关机时触发
+/// CTRL_LOGOFF_EVENT(5) — 用户注销时触发
+#[cfg(target_os = "windows")]
+extern "system" fn console_handler(_ctrl_type: u32) -> i32 {
+    use std::sync::atomic::Ordering;
+    if hosts::CLEANUP_NEEDED.load(Ordering::SeqCst) {
+        // 时间有限（约 5 秒），尽力清理，忽略错误
+        let _ = hosts::remove_host_entry("erp.hlktech.com");
+        let _ = hosts::flush_dns();
+    }
+    1 // 1 = 已处理，阻止默认处理（不终止进程，留给系统处理）
+}
+
+/// 注册 Windows 控制台事件处理器
+#[cfg(target_os = "windows")]
+fn register_console_handler() {
+    extern "system" {
+        fn SetConsoleCtrlHandler(
+            handler: Option<unsafe extern "system" fn(u32) -> i32>,
+            add: i32,
+        ) -> i32;
+    }
+    unsafe {
+        SetConsoleCtrlHandler(Some(console_handler), 1);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn register_console_handler() {
+    // 非 Windows 平台无需注册
+}
 
 // ═══════════════════════════════════════════════════════════════
 
@@ -73,6 +111,9 @@ fn setup_console() {
 }
 
 fn main() {
+    // 注册控制台事件处理器（窗口关闭/系统关机时清理 hosts）
+    register_console_handler();
+
     // 设置控制台 UTF-8 编码和 ANSI 支持
     //（管理员权限由嵌入的 Windows 清单静态声明，启动前 Windows 自动弹 UAC）
     setup_console();
