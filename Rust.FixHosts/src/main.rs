@@ -1,7 +1,8 @@
 //! Rust.FixHosts — 通过 DNSPod API 查询域名 IP 并更新本地 hosts 文件
 //!
-//! 使用方式：以管理员身份运行 Hlk_FixHosts.exe
-//! 程序会自动查询硬编码的目标域名在 DNSPod 上的 A 记录，
+//! 通过嵌入的 Windows 清单声明 requireAdministrator，
+//! Windows 会在启动前自动弹出 UAC 提权，无需代码动态处理。
+//! 成功启动后自动查询硬编码的目标域名在 DNSPod 上的 A 记录，
 //! 更新到 C:\Windows\System32\drivers\etc\hosts 中，
 //! 并执行 ipconfig /flushdns 刷新系统 DNS 缓存，使新 IP 立即生效。
 
@@ -11,6 +12,8 @@ mod hosts;
 mod secret;
 
 use std::io::{self, Read};
+
+// ═══════════════════════════════════════════════════════════════
 
 /// 等待用户按键后退出
 fn wait_for_key_press() {
@@ -71,6 +74,7 @@ fn setup_console() {
 
 fn main() {
     // 设置控制台 UTF-8 编码和 ANSI 支持
+    //（管理员权限由嵌入的 Windows 清单静态声明，启动前 Windows 自动弹 UAC）
     setup_console();
 
     // 执行核心逻辑
