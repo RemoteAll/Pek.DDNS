@@ -428,7 +428,7 @@ const providers = struct {
 
     /// 单个子域名的 DNS 记录更新：查找 → 创建/修改
     fn dnspod_update_single(allocator: std.mem.Allocator, dp: DnsPodConfig, domain: []const u8, sub_domain: []const u8, config: Config, ip: []const u8) !void {
-        const record = try dnspod_find_record(allocator, dp, domain, sub_domain, config.record_type);
+        const record = try dnspod_find_record(allocator, dp, domain, sub_domain, config.record_type, ip);
         if (record == null) {
             logger.info("dnspod: 未找到现有记录，将创建 {s}.{s} -> {s} (TTL={d})", .{ sub_domain, domain, ip, dp.ttl });
             try dnspod_create_record(allocator, dp, domain, sub_domain, config.record_type, ip, config);
@@ -464,7 +464,7 @@ const providers = struct {
         ttl: u32,
     };
 
-    fn dnspod_find_record(allocator: std.mem.Allocator, dp: DnsPodConfig, domain: []const u8, sub: []const u8, rtype: []const u8) !?DnsPodRecord {
+    fn dnspod_find_record(allocator: std.mem.Allocator, dp: DnsPodConfig, domain: []const u8, sub: []const u8, rtype: []const u8, current_ip: []const u8) !?DnsPodRecord {
         // POST https://dnsapi.cn/Record.List
         // params: login_token, format=json, domain, sub_domain, record_type
         const body = try allocFormEncoded(allocator, &.{
@@ -479,56 +479,97 @@ const providers = struct {
 
         const resp = try httpPostFormWithTimeout(allocator, "https://dnsapi.cn/Record.List", body, NETWORK_TIMEOUT_SEC);
         defer allocator.free(resp);
-        // 打印接口原始 JSON（完整）
         logger.debug("dnspod response: {s}", .{resp});
         printDnspodStatus(allocator, resp);
-        // 更严格的解析：限定在 records 数组第一条记录的对象范围内查找 id/value，避免误命中其他位置
+
+        // 定位 records 数组起始
         const recs_key = "\"records\":[";
         const recs_start = std.mem.indexOf(u8, resp, recs_key) orelse return null;
         const after_recs = resp[recs_start + recs_key.len ..];
-        const first_obj_start_rel = std.mem.indexOfScalar(u8, after_recs, '{') orelse return null;
-        const obj_slice = after_recs[first_obj_start_rel..];
-        // 找到与之匹配的第一个对象的结束位置（简易括号计数）
-        var depth: i32 = 0;
-        var end_rel: ?usize = null;
-        for (obj_slice, 0..) |ch, i| {
-            if (ch == '{') depth += 1;
-            if (ch == '}') {
-                depth -= 1;
-                if (depth == 0) {
-                    end_rel = i;
-                    break;
-                }
-            }
-        }
-        const first_obj = if (end_rel) |e| obj_slice[0..(e + 1)] else return null;
+
         const id_key = "\"id\":\"";
         const value_key = "\"value\":\"";
         const ttl_key = "\"ttl\":\"";
 
-        const id_start_rel = std.mem.indexOf(u8, first_obj, id_key) orelse return null;
-        const id_slice = first_obj[id_start_rel + id_key.len ..];
-        const id_rel_end = std.mem.indexOfScalar(u8, id_slice, '"') orelse return null;
-        const id_val = id_slice[0..id_rel_end];
+        // 遍历 records 数组中所有对象
+        var search_pos: usize = 0;
+        var first_record: ?DnsPodRecord = null;
 
-        const val_start_rel = std.mem.indexOf(u8, first_obj, value_key) orelse return null;
-        const val_slice = first_obj[val_start_rel + value_key.len ..];
-        const val_rel_end = std.mem.indexOfScalar(u8, val_slice, '"') orelse return null;
-        const value_val = val_slice[0..val_rel_end];
+        while (search_pos < after_recs.len) {
+            // 跳过空白和逗号
+            while (search_pos < after_recs.len and (after_recs[search_pos] == ' ' or after_recs[search_pos] == '\t' or
+                after_recs[search_pos] == '\n' or after_recs[search_pos] == '\r' or after_recs[search_pos] == ','))
+            {
+                search_pos += 1;
+            }
 
-        // 提取 TTL 值
-        const ttl_val: u32 = blk: {
-            const ttl_start_rel = std.mem.indexOf(u8, first_obj, ttl_key) orelse break :blk 600; // 默认 600
-            const ttl_slice = first_obj[ttl_start_rel + ttl_key.len ..];
-            const ttl_rel_end = std.mem.indexOfScalar(u8, ttl_slice, '"') orelse break :blk 600;
-            const ttl_str = ttl_slice[0..ttl_rel_end];
-            break :blk std.fmt.parseInt(u32, ttl_str, 10) catch 600;
-        };
+            // 找到对象起始 {
+            if (search_pos >= after_recs.len or after_recs[search_pos] != '{') break;
+            const obj_start = search_pos;
+            var depth: i32 = 0;
+            var obj_end: usize = search_pos;
+            while (obj_end < after_recs.len) : (obj_end += 1) {
+                if (after_recs[obj_end] == '{') depth += 1;
+                if (after_recs[obj_end] == '}') {
+                    depth -= 1;
+                    if (depth == 0) break;
+                }
+            }
+            if (depth != 0) break; // JSON 格式异常
+            const obj_slice = after_recs[obj_start .. obj_end + 1];
 
-        // 复制切片，避免释放 resp 后悬挂
-        const id_copy = try allocator.dupe(u8, id_val);
-        const val_copy = try allocator.dupe(u8, value_val);
-        return DnsPodRecord{ .id = id_copy, .value = val_copy, .ttl = ttl_val };
+            // 从当前对象中提取 id/value/ttl
+            const id_start = std.mem.indexOf(u8, obj_slice, id_key) orelse {
+                search_pos = obj_end + 1;
+                continue;
+            };
+            const id_begin = id_start + id_key.len;
+            const id_end = std.mem.indexOfScalar(u8, obj_slice[id_begin..], '"') orelse {
+                search_pos = obj_end + 1;
+                continue;
+            };
+            const id_val = obj_slice[id_begin .. id_begin + id_end];
+
+            const val_start = std.mem.indexOf(u8, obj_slice, value_key) orelse {
+                search_pos = obj_end + 1;
+                continue;
+            };
+            const val_begin = val_start + value_key.len;
+            const val_end = std.mem.indexOfScalar(u8, obj_slice[val_begin..], '"') orelse {
+                search_pos = obj_end + 1;
+                continue;
+            };
+            const value_val = obj_slice[val_begin .. val_begin + val_end];
+
+            // 提取 TTL
+            const ttl_val: u32 = blk: {
+                const ttl_start = std.mem.indexOf(u8, obj_slice, ttl_key) orelse break :blk 600;
+                const ttl_begin = ttl_start + ttl_key.len;
+                const ttl_end = std.mem.indexOfScalar(u8, obj_slice[ttl_begin..], '"') orelse break :blk 600;
+                const ttl_str = obj_slice[ttl_begin .. ttl_begin + ttl_end];
+                break :blk std.fmt.parseInt(u32, ttl_str, 10) catch 600;
+            };
+
+            // 如果这条记录已经匹配当前 IP，直接返回（无需更新）
+            if (std.mem.eql(u8, value_val, current_ip)) {
+                logger.debug("dnspod: 记录 {s} 已匹配当前 IP={s}，无需更新", .{ id_val, current_ip });
+                const id_copy = try allocator.dupe(u8, id_val);
+                const val_copy = try allocator.dupe(u8, value_val);
+                return DnsPodRecord{ .id = id_copy, .value = val_copy, .ttl = ttl_val };
+            }
+
+            // 记录第一条作为候选（备用修改目标）
+            if (first_record == null) {
+                const id_copy = try allocator.dupe(u8, id_val);
+                const val_copy = try allocator.dupe(u8, value_val);
+                first_record = DnsPodRecord{ .id = id_copy, .value = val_copy, .ttl = ttl_val };
+            }
+
+            search_pos = obj_end + 1;
+        }
+
+        // 没有记录匹配当前 IP，返回第一条记录供修改
+        return first_record;
     }
 
     fn dnspod_create_record(allocator: std.mem.Allocator, dp: DnsPodConfig, domain: []const u8, sub: []const u8, rtype: []const u8, ip: []const u8, cfg: Config) !void {
