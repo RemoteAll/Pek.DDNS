@@ -188,11 +188,11 @@ pub fn create_record(
     debug!("dnspod response: {}", resp);
     print_dnspod_status(&resp);
 
-    // 检查返回码
-    if !resp.contains("\"code\":\"1\"") {
-        return Err("API 返回非成功状态".to_string());
+    // 检查返回码: code=1 成功, code=104 记录已存在（值相同），视为成功
+    if resp.contains("\"code\":\"1\"") || resp.contains("\"code\":\"104\"") {
+        return Ok(());
     }
-    Ok(())
+    Err("API 返回非成功状态".to_string())
 }
 
 /// 修改 DNS 记录
@@ -231,10 +231,11 @@ pub fn modify_record(
     debug!("dnspod response: {}", resp);
     print_dnspod_status(&resp);
 
-    if !resp.contains("\"code\":\"1\"") {
-        return Err("API 返回非成功状态".to_string());
+    // code=1: 成功; code=104: 记录已存在（值相同），视为成功
+    if resp.contains("\"code\":\"1\"") || resp.contains("\"code\":\"104\"") {
+        return Ok(());
     }
-    Ok(())
+    Err("API 返回非成功状态".to_string())
 }
 
 /// 打印 DNSPod 响应中的状态信息

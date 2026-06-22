@@ -593,8 +593,9 @@ const providers = struct {
         defer allocator.free(resp);
         logger.debug("dnspod response: {s}", .{resp});
         printDnspodStatus(allocator, resp);
-        // 可加入状态检查，这里简化为成功只要返回中包含 "code":"1"
-        if (std.mem.indexOf(u8, resp, "\"code\":\"1\"") == null) return error.ApiFailed;
+        // code=1 成功, code=104 记录已存在（值相同）视为成功
+        if (std.mem.indexOf(u8, resp, "\"code\":\"1\"") == null and
+            std.mem.indexOf(u8, resp, "\"code\":\"104\"") == null) return error.ApiFailed;
     }
 
     fn dnspod_modify_record(allocator: std.mem.Allocator, dp: DnsPodConfig, record_id: []const u8, domain: []const u8, sub: []const u8, rtype: []const u8, ip: []const u8, cfg: Config) !void {
@@ -619,7 +620,9 @@ const providers = struct {
         defer allocator.free(resp);
         logger.debug("dnspod response: {s}", .{resp});
         printDnspodStatus(allocator, resp);
-        if (std.mem.indexOf(u8, resp, "\"code\":\"1\"") == null) return error.ApiFailed;
+        // code=1 成功, code=104 记录已存在（值相同）视为成功
+        if (std.mem.indexOf(u8, resp, "\"code\":\"1\"") == null and
+            std.mem.indexOf(u8, resp, "\"code\":\"104\"") == null) return error.ApiFailed;
     }
 };
 
