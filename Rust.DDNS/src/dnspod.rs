@@ -89,13 +89,11 @@ pub fn find_record(
 
     let resp = post_form(&url, form, timeout_sec)?;
     debug!("dnspod response: {}", resp);
-    print_dnspod_status(&resp);
 
-    // 解析 JSON 响应中的 records 数组
+    // 解析 JSON 响应并检查 API 状态
     let json: serde_json::Value =
         serde_json::from_str(&resp).map_err(|e| format!("JSON 解析失败: {}", e))?;
 
-    // 检查 API 状态
     if let Some(status) = json.get("status") {
         if let (Some(code), Some(msg)) = (status.get("code"), status.get("message")) {
             let code_str = code.as_str().unwrap_or("");
