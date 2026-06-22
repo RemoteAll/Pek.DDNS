@@ -430,7 +430,7 @@ const providers = struct {
     fn dnspod_update_single(allocator: std.mem.Allocator, dp: DnsPodConfig, domain: []const u8, sub_domain: []const u8, config: Config, ip: []const u8) !void {
         const record = try dnspod_find_record(allocator, dp, domain, sub_domain, config.record_type, ip);
         if (record == null) {
-            logger.info("dnspod: 未找到现有记录，将创建 {s}.{s} -> {s} (TTL={d})", .{ sub_domain, domain, ip, dp.ttl });
+            logger.info("dnspod: API 确认 {s}.{s} 无任何 A 记录，将新建 -> {s} (TTL={d})", .{ sub_domain, domain, ip, dp.ttl });
             try dnspod_create_record(allocator, dp, domain, sub_domain, config.record_type, ip, config);
             logger.info("dnspod: 已创建记录 {s}.{s} -> {s} (TTL={d})", .{ sub_domain, domain, ip, dp.ttl });
         } else {

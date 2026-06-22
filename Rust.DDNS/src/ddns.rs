@@ -183,7 +183,7 @@ fn dnspod_update_single(
     match record {
         None => {
             info!(
-                "dnspod: 未找到现有记录，将创建 {}.{} -> {} (TTL={})",
+                "dnspod: API 确认 {}.{} 无任何 A 记录，将新建 -> {} (TTL={})",
                 sub_domain, domain, ip, dp.ttl
             );
             dnspod::create_record(dp, domain, sub_domain, &config.record_type, ip, config, NETWORK_TIMEOUT_SEC)?;
