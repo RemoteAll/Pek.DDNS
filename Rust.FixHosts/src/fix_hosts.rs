@@ -71,11 +71,11 @@ fn verify_reachability() -> bool {
 /// 2. 更新本地 hosts 文件（临时写入，用于验证）
 /// 3. 刷新 DNS 缓存
 /// 4. 验证连通性（带 hosts 条目）
-/// 5. 清理 hosts 中写入的条目
-/// 6. 刷新 DNS 缓存后再次验证（纯 DNS 解析）
+/// hosts 清理由 main.rs 在用户按键退出后执行，
+/// 窗口关闭/系统关机时由控制台处理器提前清理
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("{}{}{}", CYAN, "────────────────────────────────────────", RESET);
-    println!("{}{}  Hlk.RFixHosts — DNSPod → Hosts 更新工具{}", BOLD, CYAN, RESET);
+    println!("{}{}  Hlk.UASHosts — DNSPod → Hosts 更新工具{}", BOLD, CYAN, RESET);
     println!("{}{}{}", CYAN, "────────────────────────────────────────", RESET);
     println!();
 
@@ -162,14 +162,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!();
     println!("{}{}{}", GREEN, "────────────────────────────────────────", RESET);
     if verify_with_hosts {
-        println!("{}✓ 全部完成！({} 已加入 hosts，退出时会自动清理){}", GREEN, full_domain, RESET);
+        println!("{}✓ 全部完成！({} 已加入 hosts，按任意键退出时自动清理){}", GREEN, full_domain, RESET);
     } else {
         println!("{}✗ 服务暂时不可达{}", RED, RESET);
     }
     println!("  {}域名:{}  {}.{}", YELLOW, RESET, TARGET_SUB_DOMAIN, TARGET_DOMAIN);
     println!("  {}IP:{}    {}{}{}", YELLOW, RESET, BOLD, dnspod_ip, RESET);
     if result.changed {
-        println!("  {}hosts:{}   已写入（关闭窗口/系统关机时自动清理）", YELLOW, RESET);
+        println!("  {}hosts:{}   已写入（按任意键退出时自动清理）", YELLOW, RESET);
     } else {
         println!("  {}hosts:{}   无需变更", YELLOW, RESET);
     }

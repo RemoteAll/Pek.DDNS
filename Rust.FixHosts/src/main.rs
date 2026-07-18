@@ -1,4 +1,4 @@
-//! Hlk.RFixHosts — 通过 DNSPod API 查询域名 IP 并更新本地 hosts 文件
+//! Hlk.UASHosts — 通过 DNSPod API 查询域名 IP 并更新本地 hosts 文件
 //!
 //! 通过嵌入的 Windows 清单声明 requireAdministrator，
 //! Windows 会在启动前自动弹出 UAC 提权，无需代码动态处理。
@@ -123,16 +123,17 @@ fn main() {
         eprintln!("\n[错误] 执行失败: {}", e);
     }
 
-    // 按 Enter 退出前清理 hosts 条目（窗口关闭/系统关机由控制台处理器处理）
+    // 正常退出前等待用户按键（避免双击时窗口一闪而过）
+    // 等待期间 hosts 条目保持有效，供用户自行验证或使用
+    wait_for_key_press();
+
+    // 按键后清理 hosts 条目（窗口关闭/系统关机时则由控制台处理器提前清理）
     if hosts::CLEANUP_NEEDED.load(std::sync::atomic::Ordering::SeqCst) {
         match hosts::remove_host_entry("erp.hlktech.com") {
             Ok(true) => println!("\nhosts 条目已清理"),
-            Ok(false) => {}
-            Err(_) => {}
+            Ok(false) => println!("\nhosts 条目不存在（可能已被控制台处理器清理）"),
+            Err(e) => println!("\nhosts 清理失败: {}", e),
         }
         let _ = hosts::flush_dns();
     }
-
-    // 正常退出前等待用户按键（避免双击时窗口一闪而过）
-    wait_for_key_press();
 }

@@ -87,7 +87,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "hlk-rfixhosts"
+name = "hlk-uashosts"
 version = "1.0.0"
 dependencies = [
  "serde",
