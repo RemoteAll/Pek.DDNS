@@ -12,6 +12,27 @@ const HOSTS_PATH = "C:\\Windows\\System32\\drivers\\etc\\hosts";
 /// Hosts 备份文件路径
 const BACKUP_PATH = "C:\\Windows\\System32\\drivers\\etc\\hosts.fixhosts.bak";
 
+/// 文件系统操作所需的全局 Io 实例（Zig 0.16+ 需显式传入）
+fn currentIo() std.Io {
+    return std.Io.Threaded.global_single_threaded.io();
+}
+
+/// 读取文件全部内容（Zig 0.16+ 的 Io.File 无 readToEndAlloc，此封装保持原调用语义）
+fn readToEndAlloc(file: std.Io.File, allocator: std.mem.Allocator, max_bytes: usize) ![]u8 {
+    const end_pos = try file.length(currentIo());
+    const capped_len: usize = @intCast(@min(end_pos, max_bytes));
+    const buffer = try allocator.alloc(u8, capped_len);
+    errdefer allocator.free(buffer);
+    const amt = try file.readPositionalAll(currentIo(), buffer, 0);
+    if (amt < capped_len) return try allocator.realloc(buffer, amt);
+    return buffer;
+}
+
+/// 写入全部字节（Zig 0.16+ 的 Io.File 无 writeAll，此封装保持原调用语义）
+fn writeAll(file: std.Io.File, bytes: []const u8) !void {
+    try file.writeStreamingAll(currentIo(), bytes);
+}
+
 /// 执行结果
 pub const HostsResult = struct {
     /// true 表示 hosts 文件实际发生了修改
@@ -24,17 +45,17 @@ pub const HostsResult = struct {
 /// 返回 null 表示 hosts 中不存在该域名
 pub fn lookupHostEntry(allocator: std.mem.Allocator, domain: []const u8) !?[]const u8 {
     const hosts_dir = std.fs.path.dirname(HOSTS_PATH) orelse return error.InvalidPath;
-    var dir = try std.fs.openDirAbsolute(hosts_dir, .{});
-    defer dir.close();
+    var dir = try std.Io.Dir.openDirAbsolute(currentIo(), hosts_dir, .{});
+    defer dir.close(currentIo());
 
-    var file = dir.openFile("hosts", .{}) catch |err| switch (err) {
+    var file = dir.openFile(currentIo(), "hosts", .{}) catch |err| switch (err) {
         error.FileNotFound => return null,
         error.AccessDenied => return error.AccessDenied,
         else => return err,
     };
-    defer file.close();
+    defer file.close(currentIo());
 
-    const content = try file.readToEndAlloc(allocator, std.math.maxInt(usize));
+    const content = try readToEndAlloc(file, allocator, std.math.maxInt(usize));
     defer allocator.free(content);
 
     return findHostIp(allocator, content, domain);
@@ -71,10 +92,10 @@ pub fn updateHostEntry(allocator: std.mem.Allocator, domain: []const u8, new_ip:
 
     // 2. 读取当前 hosts 内容
     const hosts_dir = std.fs.path.dirname(HOSTS_PATH) orelse return error.InvalidPath;
-    var dir = try std.fs.openDirAbsolute(hosts_dir, .{});
-    defer dir.close();
+    var dir = try std.Io.Dir.openDirAbsolute(currentIo(), hosts_dir, .{});
+    defer dir.close(currentIo());
 
-    const content = dir.readFileAlloc(allocator, "hosts", std.math.maxInt(usize)) catch |err| switch (err) {
+    const content = dir.readFileAlloc(currentIo(), "hosts", allocator, .unlimited) catch |err| switch (err) {
         error.FileNotFound => "",
         error.AccessDenied => return error.AccessDenied,
         else => return err,
@@ -94,9 +115,9 @@ pub fn updateHostEntry(allocator: std.mem.Allocator, domain: []const u8, new_ip:
         const new_content = try replaceIpInHosts(allocator, content, domain, new_ip);
         defer allocator.free(new_content);
 
-        var file = try dir.createFile("hosts", .{ .truncate = true });
-        defer file.close();
-        try file.writeAll(new_content);
+        var file = try dir.createFile(currentIo(), "hosts", .{ .truncate = true });
+        defer file.close(currentIo());
+        try writeAll(file, new_content);
 
         return HostsResult{ .changed = true, .current_ip = try allocator.dupe(u8, new_ip) };
     } else {
@@ -114,9 +135,9 @@ pub fn updateHostEntry(allocator: std.mem.Allocator, domain: []const u8, new_ip:
         try new_content.appendSlice(allocator, domain);
         try new_content.append(allocator, '\n');
 
-        var file = try dir.createFile("hosts", .{ .truncate = true });
-        defer file.close();
-        try file.writeAll(new_content.items);
+        var file = try dir.createFile(currentIo(), "hosts", .{ .truncate = true });
+        defer file.close(currentIo());
+        try writeAll(file, new_content.items);
 
         return HostsResult{ .changed = true, .current_ip = try allocator.dupe(u8, new_ip) };
     }
@@ -130,7 +151,7 @@ fn replaceIpInHosts(allocator: std.mem.Allocator, content: []const u8, domain: [
     var lines_iter = std.mem.splitScalar(u8, content, '\n');
     var first: bool = true;
     while (lines_iter.next()) |line| {
-        const trimmed = std.mem.trimRight(u8, line, "\r");
+        const trimmed = std.mem.trimEnd(u8, line, "\r");
         if (!first) {
             try result.append(allocator, '\n');
         }
@@ -139,7 +160,7 @@ fn replaceIpInHosts(allocator: std.mem.Allocator, content: []const u8, domain: [
         // 检查这行是否包含目标域名
         if (std.mem.indexOf(u8, trimmed, domain) != null) {
             // 跳过注释行
-            const trimmed_left = std.mem.trimLeft(u8, trimmed, " \t");
+            const trimmed_left = std.mem.trimStart(u8, trimmed, " \t");
             if (trimmed_left.len > 0 and trimmed_left[0] != '#') {
                 // 构造新行：new_ip + 空白 + 域名及后面内容
                 // 找到域名在行中的位置
@@ -163,11 +184,11 @@ fn replaceIpInHosts(allocator: std.mem.Allocator, content: []const u8, domain: [
 /// 备份当前 hosts 文件
 fn backupHostsFile() !void {
     const hosts_dir = std.fs.path.dirname(HOSTS_PATH) orelse return error.InvalidPath;
-    var dir = try std.fs.openDirAbsolute(hosts_dir, .{});
-    defer dir.close();
+    var dir = try std.Io.Dir.openDirAbsolute(currentIo(), hosts_dir, .{});
+    defer dir.close(currentIo());
 
     // 读取当前 hosts
-    const content = dir.readFileAlloc(std.heap.page_allocator, "hosts", std.math.maxInt(usize)) catch |err| switch (err) {
+    const content = dir.readFileAlloc(currentIo(), "hosts", std.heap.page_allocator, .unlimited) catch |err| switch (err) {
         error.FileNotFound => return,
         error.AccessDenied => return error.AccessDenied,
         else => return err,
@@ -175,12 +196,12 @@ fn backupHostsFile() !void {
     defer std.heap.page_allocator.free(content);
 
     // 写入备份文件
-    var backup = dir.createFile("hosts.fixhosts.bak", .{ .truncate = true }) catch |err| switch (err) {
+    var backup = dir.createFile(currentIo(), "hosts.fixhosts.bak", .{ .truncate = true }) catch |err| switch (err) {
         error.AccessDenied => return error.AccessDenied,
         else => return err,
     };
-    defer backup.close();
-    try backup.writeAll(content);
+    defer backup.close(currentIo());
+    try writeAll(backup, content);
 }
 
 /// 执行 ipconfig /flushdns 刷新系统 DNS 缓存
@@ -191,8 +212,7 @@ pub fn flushDns() !void {
         return;
     }
 
-    const result = try std.process.Child.run(.{
-        .allocator = std.heap.page_allocator,
+    const result = try std.process.run(std.heap.page_allocator, currentIo(), .{
         .argv = &.{ "ipconfig", "/flushdns" },
     });
     defer {
@@ -201,7 +221,7 @@ pub fn flushDns() !void {
     }
 
     switch (result.term) {
-        .Exited => |code| {
+        .exited => |code| {
             if (code != 0) {
                 std.debug.print("[警告] ipconfig /flushdns 返回非零退出码: {d}\n", .{code});
                 if (result.stderr.len > 0) {

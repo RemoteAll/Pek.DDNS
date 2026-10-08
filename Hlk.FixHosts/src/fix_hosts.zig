@@ -41,7 +41,7 @@ const Color = struct {
 /// 2. 更新本地 hosts 文件
 /// 3. 刷新 DNS 缓存
 pub fn run() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}).init;
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -151,7 +151,10 @@ fn verifyReachability(allocator: std.mem.Allocator) bool {
 
     std.debug.print("   请求 {s}...\n", .{url});
 
-    var client = std.http.Client{ .allocator = allocator };
+    var client = std.http.Client{
+        .allocator = allocator,
+        .io = std.Io.Threaded.global_single_threaded.io(),
+    };
     defer client.deinit();
 
     var allocating_writer = std.Io.Writer.Allocating.init(allocator);
@@ -166,7 +169,7 @@ fn verifyReachability(allocator: std.mem.Allocator) bool {
         return false;
     };
 
-    const status_code = @intFromEnum(result.status);
+    const status_code = @backingInt(result.status);
     std.debug.print("   HTTP 状态码: {d}\n", .{status_code});
 
     // 2xx 或 3xx 都算连通成功
@@ -246,7 +249,10 @@ fn queryDnsPodRecord(allocator: std.mem.Allocator) ![]const u8 {
     defer allocator.free(form_body);
 
     // 发起 HTTP POST 请求
-    var client = std.http.Client{ .allocator = allocator };
+    var client = std.http.Client{
+        .allocator = allocator,
+        .io = std.Io.Threaded.global_single_threaded.io(),
+    };
     defer client.deinit();
 
     var allocating_writer = std.Io.Writer.Allocating.init(allocator);

@@ -10,8 +10,17 @@ const fix_hosts = @import("fix_hosts.zig");
 const builtin = @import("builtin");
 
 // Windows API 函数声明
+// （Zig 0.16+ 标准库移除了 kernel32 常用封装，改为自行 extern 声明）
 extern "kernel32" fn SetConsoleOutputCP(wCodePageID: u32) c_int;
 extern "kernel32" fn SetConsoleCP(wCodePageID: u32) c_int;
+extern "kernel32" fn GetStdHandle(nStdHandle: u32) callconv(.winapi) ?std.os.windows.HANDLE;
+extern "kernel32" fn ReadFile(hFile: std.os.windows.HANDLE, lpBuffer: [*]u8, nNumberOfBytesToRead: u32, lpNumberOfBytesRead: *u32, lpOverlapped: ?*anyopaque) callconv(.winapi) std.os.windows.BOOL;
+extern "kernel32" fn GetConsoleMode(hConsoleHandle: std.os.windows.HANDLE, lpMode: *u32) callconv(.winapi) std.os.windows.BOOL;
+extern "kernel32" fn SetConsoleMode(hConsoleHandle: std.os.windows.HANDLE, dwMode: u32) callconv(.winapi) std.os.windows.BOOL;
+
+/// 标准控制台句柄编号（-10 / -11，按 Win32 定义）
+const STD_INPUT_HANDLE: u32 = @bitCast(@as(i32, -10));
+const STD_OUTPUT_HANDLE: u32 = @bitCast(@as(i32, -11));
 
 /// 等待用户按键后退出
 fn waitForKeyPress() void {
@@ -19,12 +28,12 @@ fn waitForKeyPress() void {
 
     if (builtin.os.tag == .windows) {
         const w = std.os.windows;
-        const stdin_handle = w.kernel32.GetStdHandle(w.STD_INPUT_HANDLE);
+        const stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
         if (stdin_handle == null or stdin_handle == w.INVALID_HANDLE_VALUE) return;
 
         var buf: [1]u8 = undefined;
         var bytes_read: w.DWORD = 0;
-        _ = w.kernel32.ReadFile(stdin_handle.?, &buf, 1, &bytes_read, null);
+        _ = ReadFile(stdin_handle.?, &buf, 1, &bytes_read, null);
     } else {
         var buf: [1]u8 = undefined;
         _ = std.posix.read(std.posix.STDIN_FILENO, &buf) catch {};
@@ -40,11 +49,11 @@ pub fn main() !void {
         _ = SetConsoleCP(65001);
 
         // 启用 ANSI 转义序列支持
-        const h = w.kernel32.GetStdHandle(w.STD_OUTPUT_HANDLE);
+        const h = GetStdHandle(STD_OUTPUT_HANDLE);
         if (h != null and h != w.INVALID_HANDLE_VALUE) {
             var m: w.DWORD = 0;
-            if (w.kernel32.GetConsoleMode(h.?, &m) != 0) {
-                _ = w.kernel32.SetConsoleMode(h.?, m | 0x0004);
+            if (GetConsoleMode(h.?, &m).toBool()) {
+                _ = SetConsoleMode(h.?, m | 0x0004);
             }
         }
     }
