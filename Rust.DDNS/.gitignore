@@ -1,0 +1,18 @@
+# Rust 构建产物
+target/
+Cargo.lock
+
+# 运行时配置文件（部署时单独管理，不提交仓库）
+config.json
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+*~
+
+# Windows 系统文件
+Thumbs.db
+Desktop.ini

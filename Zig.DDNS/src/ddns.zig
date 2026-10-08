@@ -66,7 +66,6 @@ pub fn run(config: Config) !void {
 }
 
 fn runWithAllocator(allocator: std.mem.Allocator, config: Config) !void {
-
     logger.info("🚀 程序启动 - 更新周期: {d}秒", .{config.interval_sec});
     runtime_stats.last_success_time = compat.timestamp();
 
@@ -352,7 +351,7 @@ const providers = struct {
     fn dnspod_update_single(allocator: std.mem.Allocator, client: *std.http.Client, dp: DnsPodConfig, domain: []const u8, sub_domain: []const u8, config: Config, ip: []const u8) !void {
         const record = try dnspod_find_record(allocator, client, dp, domain, sub_domain, config.record_type, ip);
         if (record == null) {
-            logger.info("dnspod: 未找到现有记录，将创建 {s}.{s} -> {s} (TTL={d})", .{ sub_domain, domain, ip, dp.ttl });
+            logger.info("dnspod: API 确认 {s}.{s} 无任何 A 记录，将新建 -> {s} (TTL={d})", .{ sub_domain, domain, ip, dp.ttl });
             try dnspod_create_record(allocator, client, dp, domain, sub_domain, config.record_type, ip, config);
             logger.info("dnspod: 已创建记录 {s}.{s} -> {s} (TTL={d})", .{ sub_domain, domain, ip, dp.ttl });
         } else {
@@ -491,8 +490,9 @@ const providers = struct {
         defer allocator.free(resp);
         logger.debug("dnspod response bytes: {d}", .{resp.len});
         printDnspodStatus(allocator, resp);
-        // 可加入状态检查，这里简化为成功只要返回中包含 "code":"1"
-        if (std.mem.indexOf(u8, resp, "\"code\":\"1\"") == null) return error.ApiFailed;
+        // code=1 成功, code=104 记录已存在（值相同）视为成功
+        if (std.mem.indexOf(u8, resp, "\"code\":\"1\"") == null and
+            std.mem.indexOf(u8, resp, "\"code\":\"104\"") == null) return error.ApiFailed;
     }
 
     fn dnspod_modify_record(allocator: std.mem.Allocator, client: *std.http.Client, dp: DnsPodConfig, record_id: []const u8, domain: []const u8, sub: []const u8, rtype: []const u8, ip: []const u8, cfg: Config) !void {
@@ -525,7 +525,9 @@ const providers = struct {
         defer allocator.free(resp);
         logger.debug("dnspod response bytes: {d}", .{resp.len});
         printDnspodStatus(allocator, resp);
-        if (std.mem.indexOf(u8, resp, "\"code\":\"1\"") == null) return error.ApiFailed;
+        // code=1 成功, code=104 记录已存在（值相同）视为成功
+        if (std.mem.indexOf(u8, resp, "\"code\":\"1\"") == null and
+            std.mem.indexOf(u8, resp, "\"code\":\"104\"") == null) return error.ApiFailed;
     }
 };
 
@@ -563,7 +565,7 @@ fn printDnspodStatus(allocator: std.mem.Allocator, resp: []const u8) void {
     };
     logger.debug("dnspod status raw bytes: {d}", .{resp.len});
 }
- 
+
 test "buildDnsPodFormEncoded preserves raw comma in login_token" {
     const allocator = std.testing.allocator;
 
