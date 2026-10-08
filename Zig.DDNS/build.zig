@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-const min_zig_string = "0.16.0";
+const min_zig_string = "0.17.0";
 
 comptime {
     const min_zig = std.SemanticVersion.parse(min_zig_string) catch unreachable;
@@ -30,7 +30,7 @@ pub fn build(b: *std.Build) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
-    const release_min = optimize != .Debug;
+    const release_min = optimize != .debug;
     const install_probe = b.option(bool, "install-probe", "Install auxiliary NetProbe executable") orelse !release_min;
     // It's also possible to define more custom flags to toggle optional features
     // of this build script using `b.option()`. All defined flags (including
@@ -155,17 +155,13 @@ pub fn build(b: *std.Build) void {
 
     // This allows the user to pass arguments to the application in the build
     // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
 
     const probe_step = b.step("probe", "Run the network probe");
     const probe_cmd = b.addRunArtifact(probe_exe);
     probe_step.dependOn(&probe_cmd.step);
 
-    if (b.args) |args| {
-        probe_cmd.addArgs(args);
-    }
+    probe_cmd.addPassthruArgs();
 
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to

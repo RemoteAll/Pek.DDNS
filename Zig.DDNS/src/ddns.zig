@@ -56,7 +56,7 @@ fn currentIo() std.Io {
 }
 
 pub fn run(config: Config) !void {
-    if (builtin.mode == .Debug) {
+    if (builtin.mode == .debug) {
         var gpa = std.heap.DebugAllocator(.{}).init;
         defer _ = gpa.deinit();
         return runWithAllocator(gpa.allocator(), config);
