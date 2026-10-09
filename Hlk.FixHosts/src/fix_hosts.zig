@@ -96,8 +96,9 @@ pub fn run() !void {
     if (result.changed) {
         std.debug.print("   {s}✓{s} hosts 文件已更新: {s}{s}{s} → {s}{s}{s}\n", .{
             Color.green, Color.reset,
-            Color.red, result.current_ip, Color.reset,
-            Color.green, dnspod_ip, Color.reset,
+            Color.red,   result.current_ip,
+            Color.reset, Color.green,
+            dnspod_ip,   Color.reset,
         });
     } else {
         std.debug.print("   {s}✓{s} hosts 中 IP 无变化（{s}{s}{s}），跳过写入{s}\n", .{
@@ -242,7 +243,8 @@ fn queryDnsPodRecord(allocator: std.mem.Allocator) ![]const u8 {
     const login_token = try std.fmt.allocPrint(allocator, "{s},{s}", .{ DNSPOD_TOKEN_ID, DNSPOD_TOKEN });
     defer allocator.free(login_token);
 
-    const form_body = try std.fmt.allocPrint(allocator,
+    const form_body = try std.fmt.allocPrint(
+        allocator,
         "login_token={s}&format=json&domain={s}&sub_domain={s}&record_type={s}",
         .{ login_token, TARGET_DOMAIN, TARGET_SUB_DOMAIN, RECORD_TYPE },
     );
