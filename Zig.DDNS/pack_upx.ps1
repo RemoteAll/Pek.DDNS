@@ -34,7 +34,7 @@ zig build -Doptimize=ReleaseSmall --prefix zig-out-small
 
 New-Item -ItemType Directory -Path $releaseDir -Force | Out-Null
 Copy-Item '.\zig-out-small\bin\Zig_DDNS.exe' $releaseExe -Force
-Copy-Item '.\zig-out-small\bin\config.json' $releaseConfig -Force
+Copy-Item '.\config.json' $releaseConfig -Force
 & $upxPath --best --lzma $releaseExe
 if ($LASTEXITCODE -ne 0) { throw "UPX failed with exit code $LASTEXITCODE" }
 
