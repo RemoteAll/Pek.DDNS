@@ -112,6 +112,18 @@ cargo run
 
 程序将每 60 秒（可配置）自动检测公网 IP，如有变化则更新 DNS 解析。
 
+## 部署到服务器（Linux，星尘托管）
+
+服务器上推荐由**星尘（Pek.RAgent）**托管运行（守护拉起、面板可视化管理、覆盖程序文件即自动重启升级）：
+
+```bash
+sudo sh deploy/install.sh                  # 一键：文件就位 + 注册进星尘
+sudo sh deploy/install.sh /opt/rust-ddns   # 指定安装目录
+sudo sh deploy/install.sh --unregister     # 从星尘注销
+```
+
+`config.json` 未就绪（缺失或仍是模板占位）时脚本会**暂不启动**，填好后一键启动；详见 `deploy/README-部署.md`。
+
 ## 配置说明
 
 ### 配置文件字段
@@ -201,6 +213,7 @@ Rust.DDNS/
 ├── Cargo.toml           # 项目配置与依赖
 ├── config.example.json  # 配置模板
 ├── config.json          # 运行时配置（自动生成）
+├── deploy/              # 部署脚本（install.sh 一键安装进星尘）
 ├── README.md            # 本文件
 ├── LICENSE              # MIT 许可证
 └── src/

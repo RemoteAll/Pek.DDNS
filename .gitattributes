@@ -1,0 +1,2 @@
+# 脚本类文件固定以 LF 检出（若在 Windows 检出为 CRLF，上传到 Linux 后无法直接执行）
+*.sh text eol=lf
