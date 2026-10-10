@@ -20,8 +20,8 @@ Rust.DDNS 一键发布打包（Windows 主机）
 前置条件（仅 Linux 交叉构建需要；缺失时脚本自动补齐）：
   - cargo-zigbuild：cargo install --locked cargo-zigbuild      （缺失时自动安装）
   - rustup 目标组件：x86_64-unknown-linux-musl                 （缺失时自动安装）
-  - zig 可执行文件（查找顺序：CARGO_ZIGBUILD_ZIG_PATH → G:\Tools\zig → 项目 tools\zig
-      → 自动从清华 PyPI 镜像下载到 tools\zig）
+  - zig 可执行文件（查找顺序：CARGO_ZIGBUILD_ZIG_PATH → E:\Soft\zig-* → G:\Tools\zig →
+      项目 tools\zig → 自动从清华 PyPI 镜像下载到 tools\zig）
 
 版本守卫（可选，推荐）：
   自动定位 DH.RustBase 的 tools\version-guard.ps1（查找：$env:DHRUST_PATH →
@@ -74,13 +74,17 @@ if ($guardScript) {
     Write-Warning '未找到版本守卫（DH.RustBase/tools/version-guard.ps1）——跳过「同版本内容变化」打包拦截'
 }
 
-# zig 版本（自动下载时使用；与 cargo-zigbuild 的已验证组合）
-$ZigVersion = '0.16.0'
+# zig 版本（自动下载时使用；与 cargo-zigbuild 的已验证组合——2026-10-10 实测 0.17.0 通过）
+$ZigVersion = '0.17.0'
 
-# 定位 zig.exe：CARGO_ZIGBUILD_ZIG_PATH → G:\Tools\zig → 项目 tools\zig → 自动下载（清华 PyPI 镜像）
+# 定位 zig.exe：CARGO_ZIGBUILD_ZIG_PATH → E:\Soft\zig-* → G:\Tools\zig → 项目 tools\zig → 自动下载（清华 PyPI 镜像）
 function Resolve-Zig {
     $candidates = @()
     if ($env:CARGO_ZIGBUILD_ZIG_PATH) { $candidates += $env:CARGO_ZIGBUILD_ZIG_PATH }
+    # 注意：通配路径 + -Recurse -Filter 组合会返回空（PowerShell 行为）——先列目录、再各自递归
+    $candidates += @(Get-ChildItem 'E:\Soft\zig-*' -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                         Get-ChildItem $_.FullName -Recurse -Filter zig.exe -ErrorAction SilentlyContinue } |
+                     Sort-Object FullName -Descending | Select-Object -ExpandProperty FullName)
     $candidates += @(Get-ChildItem 'G:\Tools\zig' -Recurse -Filter zig.exe -ErrorAction SilentlyContinue |
                      Sort-Object FullName -Descending | Select-Object -ExpandProperty FullName)
     $localTools = Join-Path $root 'tools\zig'
@@ -153,7 +157,7 @@ function Resolve-Zig {
         Write-Host "zig 已就绪：$found"
         return $found
     }
-    throw "自动下载 zig 失败：请手动准备 —— 1) 官网 https://ziglang.org/download/ 下载 zig-$ZigVersion 并解压；2) 或清华 PyPI 的 ziglang wheel（zip）解压；然后用环境变量 CARGO_ZIGBUILD_ZIG_PATH 指向 zig.exe，或放到 G:\Tools\zig / 项目 tools\zig"
+    throw "自动下载 zig 失败：请手动准备 —— 1) 官网 https://ziglang.org/download/ 下载 zig-$ZigVersion 并解压；2) 或清华 PyPI 的 ziglang wheel（zip）解压；然后用环境变量 CARGO_ZIGBUILD_ZIG_PATH 指向 zig.exe，或放到 E:\Soft\zig-* / G:\Tools\zig / 项目 tools\zig"
 }
 
 # ---- 清理 ----
