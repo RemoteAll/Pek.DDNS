@@ -83,7 +83,35 @@ sudo sh install.sh --unregister   # Linux：停止并移除星尘条目；保留
 powershell -ExecutionPolicy Bypass -File install.ps1 -Unregister   # Windows：同上
 ```
 
-## 七、一键打包（仓库已内置）
+> 多实例注销：Linux 加 `--name <名称>`、Windows 加 `-Name <名称>`（与注册时一致）。
+
+## 七、多实例部署（同一程序，多个子服务）
+
+同一台机器可运行多个 Rust.DDNS 实例（如不同域名 / 不同 Token），互不影响——**每个实例＝独立目录 ＋ 独立 `config.json` ＋ 不同子服务名**：
+
+```bash
+# Linux：第二实例
+sudo sh install.sh /opt/rust-ddns-b --name Rust_DDNS_B
+
+# 注销该实例
+sudo sh install.sh --unregister --name Rust_DDNS_B
+```
+
+```powershell
+# Windows：第二实例
+powershell -ExecutionPolicy Bypass -File install.ps1 -Dir D:\rust-ddns-b -Name Rust_DDNS_B
+
+# 注销该实例
+powershell -ExecutionPolicy Bypass -File install.ps1 -Unregister -Name Rust_DDNS_B
+```
+
+要点：
+
+- **子服务名必须不同**（同名是「更新覆盖」，不会并存）；程序文件名仍为 `Rust_DDNS(.exe)`，仅注册名不同；
+- 每个实例独立目录与配置；**升级只需覆盖各自目录中的程序文件**，星尘按实例监视/重启，互不影响；
+- 停止/重启/升级均按实例（PID 定点），不会波及同名或相邻实例（见用户级指令「覆盖升级惯例」）。
+
+## 八、一键打包（仓库已内置）
 
 ```powershell
 # Windows 主机执行：产出 dist\（Linux 包内已含本 install.sh + 配置模板 + 本说明）

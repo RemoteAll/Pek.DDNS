@@ -15,6 +15,7 @@
 #   sudo sh install.sh --no-agent                   只部署文件，不注册（自行 systemd 运行）
 #   sudo sh install.sh --agent-exe <星尘程序路径>   自动探测失败时手动指定
 #   sudo sh install.sh --unregister                 从星尘注销（停止并移除条目；保留文件）
+#   sudo sh install.sh --name <子服务名>             多实例：注册为不同子服务名（默认 Rust_DDNS）
 #
 # 说明：
 #   - 本程序为常驻服务（按 config.json 的 interval_sec 轮询，默认 60 秒）；
@@ -41,6 +42,7 @@ usage() {
   sudo sh install.sh --no-agent                   只部署文件，不注册
   sudo sh install.sh --agent-exe <星尘程序路径>   手动指定星尘程序（自动探测失败时）
   sudo sh install.sh --unregister                 从星尘注销（停止并移除条目）
+  sudo sh install.sh --name <子服务名>             多实例：注册为不同子服务名（默认 Rust_DDNS）
   -h | --help                                     显示帮助
 EOF
     exit 0
@@ -50,6 +52,9 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --no-agent) DO_REGISTER=0; shift ;;
         --unregister) DO_UNREGISTER=1; shift ;;
+        --name)
+            [ -n "${2:-}" ] || { echo "错误：--name 缺少参数" >&2; exit 2; }
+            SERVICE_NAME=$2; shift 2 ;;
         --agent-exe)
             [ -n "${2:-}" ] || { echo "错误：--agent-exe 缺少参数" >&2; exit 2; }
             AGENT_EXE=$2; shift 2 ;;

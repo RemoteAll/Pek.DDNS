@@ -133,6 +133,8 @@ powershell -ExecutionPolicy Bypass -File deploy\install.ps1 -Dir D:\rust-ddns  #
 powershell -ExecutionPolicy Bypass -File deploy\install.ps1 -Unregister        # 从星尘注销
 ```
 
+> 多实例：同一机器可注册多个实例——不同目录、不同子服务名（`--name` / `-Name`），互不影响；详见 `deploy/README-部署.md`。
+
 `config.json` 未就绪（缺失或仍是模板占位）时脚本会**暂不启动**，填好后一键启动；详见 `deploy/README-部署.md`。
 
 ## 配置说明

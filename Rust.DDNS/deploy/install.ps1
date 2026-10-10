@@ -16,6 +16,7 @@ Rust.DDNS Windows 一键安装（文件就位 + 安装到本机星尘）
   powershell -ExecutionPolicy Bypass -File install.ps1 -NoAgent           只部署文件，不注册
   powershell -ExecutionPolicy Bypass -File install.ps1 -AgentExe <星尘exe路径>
   powershell -ExecutionPolicy Bypass -File install.ps1 -Unregister        从星尘注销
+  powershell -ExecutionPolicy Bypass -File install.ps1 -Name Rust_DDNS_B  多实例：注册为不同子服务名（默认 Rust_DDNS）
 
 说明：
   - 本程序为常驻服务（按 config.json 的 interval_sec 轮询，默认 60 秒）；
@@ -28,6 +29,7 @@ Rust.DDNS Windows 一键安装（文件就位 + 安装到本机星尘）
 param(
     [Parameter(Position = 0)][string]$Dir,
     [string]$AgentExe,
+    [string]$Name = 'Rust_DDNS',
     [switch]$NoAgent,
     [switch]$Unregister,
     [switch]$Help
@@ -37,7 +39,7 @@ $ErrorActionPreference = 'Stop'
 
 $SelfDir = Split-Path -Parent $PSCommandPath
 $BinName = 'Rust_DDNS'
-$ServiceName = 'Rust_DDNS'
+$ServiceName = $Name
 
 if ($Help) {
     Write-Host '用法：'
@@ -46,6 +48,7 @@ if ($Help) {
     Write-Host '  powershell -ExecutionPolicy Bypass -File install.ps1 -NoAgent           只部署文件，不注册'
     Write-Host '  powershell -ExecutionPolicy Bypass -File install.ps1 -AgentExe <星尘exe路径>'
     Write-Host '  powershell -ExecutionPolicy Bypass -File install.ps1 -Unregister        从星尘注销'
+    Write-Host '  powershell -ExecutionPolicy Bypass -File install.ps1 -Name Rust_DDNS_B  多实例：注册为不同子服务名（默认 Rust_DDNS）'
     Write-Host '  -Help                                                                   显示帮助'
     exit 0
 }
