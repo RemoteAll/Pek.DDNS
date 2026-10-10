@@ -1,5 +1,5 @@
 use crate::config::{Config, DnsPodConfig};
-use crate::debug;
+use dhrust::logs::debug;
 use std::time::Duration;
 
 /// DNSPod 记录结构

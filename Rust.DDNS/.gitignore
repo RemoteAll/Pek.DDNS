@@ -6,8 +6,9 @@ Cargo.lock
 dist/
 tools/
 
-# 运行时配置文件（部署时单独管理，不提交仓库）
+# 运行时配置文件与日志（部署时单独管理，不提交仓库）
 config.json
+Log/
 
 # IDE
 .idea/

@@ -1,6 +1,6 @@
 use crate::config::*;
 use crate::dnspod;
-use crate::{debug, error, info, warn};
+use dhrust::logs::{debug, error, info, warn};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::sync::OnceLock;

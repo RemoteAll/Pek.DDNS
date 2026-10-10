@@ -1,8 +1,8 @@
 mod config;
 mod ddns;
 mod dnspod;
-mod logger;
 
+use dhrust::logs::{error, info, warn};
 use std::io::Read;
 
 /// 跨平台等待用户按键，避免窗口一闪而过
@@ -15,31 +15,16 @@ fn wait_for_key_press() {
     let _ = stdin.read(&mut buf);
 }
 
-/// 配置错误退出：显示错误信息后等待用户按键
+/// 配置错误退出：等待按键、日志同步落盘后以非零码退出
 fn config_error() -> ! {
     wait_for_key_press();
+    dhrust::logs::flush();
     std::process::exit(1);
 }
 
 fn main() {
-    // Windows 控制台 UTF-8 支持
-    #[cfg(windows)]
-    {
-        unsafe {
-            // 设置控制台输出为 UTF-8 (代码页 65001)
-            kernel32::SetConsoleOutputCP(65001);
-            kernel32::SetConsoleCP(65001);
-
-            // 启用虚拟终端处理（支持 ANSI 转义序列）
-            let h = kernel32::GetStdHandle(kernel32::STD_OUTPUT_HANDLE);
-            if h != kernel32::INVALID_HANDLE_VALUE as _ && !h.is_null() {
-                let mut mode: u32 = 0;
-                if kernel32::GetConsoleMode(h, &mut mode) != 0 {
-                    kernel32::SetConsoleMode(h, mode | 0x0004);
-                }
-            }
-        }
-    }
+    // 日志：DH.RustBase 通用日志（控制台着色 + 按天文件 Log/；RUST_LOG 调整级别，默认 Info）
+    dhrust::logs::init_console_and_file("Log", true, dhrust::logs::level_from_env());
 
     // 优先使用配置文件 config.json
     let config_path = "config.json";
@@ -86,25 +71,5 @@ fn main() {
     }
 }
 
-// Windows kernel32 API 绑定
-#[cfg(windows)]
-mod kernel32 {
-    use std::ffi::c_void;
-
-    pub const STD_OUTPUT_HANDLE: u32 = 0xFFFFFFF5u32;
-    pub const INVALID_HANDLE_VALUE: isize = -1;
-
-    pub type DWORD = u32;
-    pub type HANDLE = *mut c_void;
-    pub type LPDWORD = *mut DWORD;
-
-    extern "system" {
-        pub fn SetConsoleOutputCP(wCodePageID: DWORD) -> i32;
-        pub fn SetConsoleCP(wCodePageID: DWORD) -> i32;
-        pub fn GetStdHandle(nStdHandle: DWORD) -> HANDLE;
-        pub fn GetConsoleMode(hConsoleHandle: HANDLE, lpMode: LPDWORD) -> i32;
-        pub fn SetConsoleMode(hConsoleHandle: HANDLE, dwMode: DWORD) -> i32;
-    }
-}
 
 

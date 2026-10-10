@@ -25,20 +25,20 @@
 
 ### 📝 日志系统
 
-- **结构化日志输出**：支持 DEBUG/INFO/WARN/ERROR 四级日志
-- **本地时区显示**：自动显示本地时间
-- **彩色输出支持**：支持 ANSI 颜色输出
+- **基于 DH.RustBase 通用日志**（对齐 DH.NCore NewLife.Log；与 Pek.RAgent 等组件共用同一日志体系）
+- **控制台着色 + 文件落盘**：程序目录 `Log/` 按天滚动（`yyyy_MM_dd.log`，单文件 10MB 拆分、保留 200 份）
+- **级别可控**：环境变量 `RUST_LOG`（all/debug/info/warn/error/fatal/off，默认 info）
 
 ### 🌍 平台支持
 
-- **Windows**：原生 UTF-8 支持，使用 Windows API 获取控制台编码
+- **Windows**：控制台 UTF-8/ANSI 由 DH.RustBase 日志初始化自动处理
 - **Linux/macOS**：POSIX 标准接口，完整跨平台兼容
 - **内置 HTTP 客户端**：基于 ureq 库，轻量无外部运行时依赖
 
 ### 🛠️ 扩展性
 
 - **模块化架构**：Provider 接口设计，易于添加新 DNS 服务商
-- **可组合模块**：logger、config、ddns、dnspod 核心模块独立可复用
+- **可组合模块**：config、ddns、dnspod 核心模块独立可复用（日志采用 DH.RustBase 通用实现）
 
 ## 快速开始
 
@@ -46,6 +46,7 @@
 
 - Rust 2021 edition 及以上版本
 - Windows/Linux/macOS 任意平台
+- 依赖库 **DH.RustBase**（dhrust）源码：与本工程同级约定路径 `<盘符>:\Code\Rust\DH.RustBase`（相对路径 `../../../Code/Rust/DH.RustBase`）
 
 ### 构建项目
 
@@ -203,35 +204,40 @@ powershell -ExecutionPolicy Bypass -File deploy\install.ps1 -Unregister        #
 
 ### 日志级别
 
-- **DEBUG**：详细调试信息（API 请求、响应内容等）
-- **INFO**：正常运行信息（IP 检测、DNS 更新成功等）
+- **DEBUG**：详细调试信息（API 请求、响应内容等；`RUST_LOG=debug` 开启）
+- **INFO**：正常运行信息（IP 检测、DNS 更新成功等，默认级别）
 - **WARN**：警告信息（配置提示、降级处理等）
-- **ERROR**：错误信息（API 失败、网络异常等）
+- **ERROR / FATAL**：错误信息（API 失败、网络异常等）
 
 ### 日志示例
 
+控制台与 `Log/` 文件双落盘（按天滚动；以下为真实输出，首段为文件头）：
+
 ```log
-[2025-10-29 20:21:45] DEBUG ip-source raw: [{"Ip": "113.116.242.207", "Type": "IPv4"}]
-[2025-10-29 20:21:45] DEBUG dnspod Record.List - domain=example.com sub_domain=www type=A
-[2025-10-29 20:21:46] INFO dnspod: www.example.com 无变化 (ip=113.116.242.207, ttl=60)
+#Software: Rust_DDNS
+#ProcessID: 33628 x64
+#FileName: D:\rust-ddns\Rust_DDNS.exe
+#OS: Microsoft Windows NT 10.0.26200.0
+#Fields: Time ThreadId Kind Name Message
+12:51:32.129 01 N - 请在 config.json 中配置真实的 domain
+12:51:32.129 01 N - 按任意键退出...
 ```
 
 ## 项目结构
 
 ```
 Rust.DDNS/
-├── Cargo.toml           # 项目配置与依赖
+├── Cargo.toml           # 项目配置与依赖（日志等通用能力来自 DH.RustBase）
 ├── config.example.json  # 配置模板
 ├── config.json          # 运行时配置（自动生成）
 ├── deploy/              # 部署脚本（install.sh / install.ps1 一键安装进星尘）
 ├── README.md            # 本文件
 ├── LICENSE              # MIT 许可证
 └── src/
-    ├── main.rs          # 程序入口 - 配置加载、Windows UTF-8 支持
+    ├── main.rs          # 程序入口 - 配置加载、日志初始化（DH.RustBase）
     ├── config.rs        # 配置模块 - 配置文件解析与验证
     ├── ddns.rs          # 核心逻辑 - IP 获取、DNS 更新循环
-    ├── dnspod.rs        # DNSPod API 客户端 - Record.List/Create/Modify
-    └── logger.rs        # 日志模块 - 彩色结构化日志输出
+    └── dnspod.rs        # DNSPod API 客户端 - Record.List/Create/Modify
 ```
 
 ## 与 Zig 版本的差异
