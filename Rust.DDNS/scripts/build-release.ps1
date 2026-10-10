@@ -6,6 +6,7 @@ Rust.DDNS 一键发布打包（Windows 主机）
   - Linux  ：cargo-zigbuild + zig 交叉编译（静态单文件，musl x86_64），
               包内附带 install.sh（一键安装进星尘 Pek.RAgent）+ 配置模板 + 部署说明
   - 产物输出到 dist\（zip / tar.gz / SHA256SUMS.txt）
+  - 版本号：默认自动递升补丁号（-NoBump 关闭；-BumpMinor 升次版本）
 
 用法：
   powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1
@@ -13,9 +14,10 @@ Rust.DDNS 一键发布打包（Windows 主机）
     -Targets 默认 all；可多选：-Targets linux / -Targets windows
     -Clean        先清理 dist 旧产物与 zig 缓存，再构建
     -CleanAll     额外执行 cargo clean（清空全部编译缓存，最省磁盘）
+    -NoBump       关闭「默认自动递升补丁版本号」（保持当前版本打包；仍受守卫拦截）
     -Force        跳过「同版本内容变化」打包拦截（逃生门；需版本守卫可用）
-    -Bump         打包前自动递升补丁版本号（写 Cargo.toml + 更新 Cargo.lock）
-    -BumpMinor    打包前自动递升次版本号（minor，补丁归零）
+    -Bump         兼容保留：显式递升补丁号（现为默认行为）
+    -BumpMinor    递升次版本号（minor，补丁归零）
 
 前置条件（仅 Linux 交叉构建需要；缺失时脚本自动补齐）：
   - cargo-zigbuild：cargo install --locked cargo-zigbuild      （缺失时自动安装）
@@ -26,8 +28,9 @@ Rust.DDNS 一键发布打包（Windows 主机）
 版本守卫（可选，推荐）：
   自动定位 DH.RustBase 的 tools\version-guard.ps1（查找：$env:DHRUST_PATH →
   F:\Code\Rust\DH.RustBase → G:\Code\Rust\DH.RustBase → 相对路径 ../../../Code/Rust →
-  %USERPROFILE%\Code\Rust），同一版本号重复打包且内容指纹变化时默认拒绝；
-  找不到守卫时跳过拦截（仅告警），-Bump/-BumpMinor 在无守卫时报错终止。
+  %USERPROFILE%\Code\Rust）；**打包默认自动递升补丁版本号**（-NoBump 关闭），
+  同版本号内容指纹变化时默认拒绝；找不到守卫时跳过升号与拦截（仅告警），
+  显式 -Bump/-BumpMinor 在无守卫时报错终止。
 #>
 
 param(
@@ -36,8 +39,9 @@ param(
     [switch]$Clean,
     [switch]$CleanAll,
     [switch]$Force,
-    [switch]$Bump,
-    [switch]$BumpMinor
+    [switch]$NoBump,     # 关闭默认的自动递升补丁版本号
+    [switch]$Bump,       # 兼容保留：显式递升补丁号（现为默认行为）
+    [switch]$BumpMinor   # 递升次版本号（minor，补丁归零）
 )
 
 function Test-Want([string]$name) { $Targets -contains 'all' -or $Targets -contains $name }
@@ -67,11 +71,13 @@ foreach ($c in $guardCands) {
 }
 if ($guardScript) {
     . $guardScript
-    Assert-VersionGuard -RepoRoot $root -Name 'rust-ddns' -Force:$Force -Bump:$Bump -BumpMinor:$BumpMinor `
+    # 默认自动递升补丁版本号（-NoBump 关闭；-BumpMinor 递升次版本）
+    Assert-VersionGuard -RepoRoot $root -Name 'rust-ddns' -Force:$Force `
+        -Bump:((-not $NoBump) -and (-not $BumpMinor)) -BumpMinor:$BumpMinor `
         -Include @('Cargo.toml', 'Cargo.lock', 'src', 'deploy', 'config.example.json')
 } else {
     if ($Bump -or $BumpMinor) { throw '-Bump/-BumpMinor 需要版本守卫脚本（未找到 DH.RustBase/tools/version-guard.ps1；可设置环境变量 DHRUST_PATH）' }
-    Write-Warning '未找到版本守卫（DH.RustBase/tools/version-guard.ps1）——跳过「同版本内容变化」打包拦截'
+    Write-Warning '未找到版本守卫（DH.RustBase/tools/version-guard.ps1）——跳过自动升号与「同版本内容变化」打包拦截'
 }
 
 # zig 版本（自动下载时使用；与 cargo-zigbuild 的已验证组合——2026-10-10 实测 0.17.0 通过）
@@ -279,5 +285,6 @@ if ($shaLines) {
 Write-Host ''
 Write-Host '== 打包完成，产物（dist） =='
 Get-ChildItem 'dist' | Sort-Object Name | Format-Table Name, @{ n = 'KB'; e = { [math]::Round($_.Length / 1KB, 0) } } -AutoSize | Out-String | Write-Host
+Write-Host '提示：打包默认自动递升补丁号（-NoBump 可关；次版本用 -BumpMinor）。'
 Write-Host '提示：Linux 包解压后 sudo sh install.sh（一键安装进星尘/手动运行）；Windows 包解压直接运行 exe。'
 Write-Host '提示：-Clean 清理 zig 缓存与旧产物；-CleanAll 额外清空 target（全量重建、最省空间）。'
