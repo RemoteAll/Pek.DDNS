@@ -2,7 +2,7 @@
 Rust.DDNS 一键发布打包（Windows 主机）
 
 功能：
-  - Windows：本机 MSVC release 构建（target\release\Rust_DDNS.exe），产物含配置模板
+  - Windows：本机 MSVC release 构建（target\release\Rust_DDNS.exe），产物含 install.ps1（一键安装进星尘）+ 配置模板 + 部署说明
   - Linux  ：cargo-zigbuild + zig 交叉编译（静态单文件，musl x86_64），
               包内附带 install.sh（一键安装进星尘 Pek.RAgent）+ 配置模板 + 部署说明
   - 产物输出到 dist\（zip / tar.gz / SHA256SUMS.txt）
@@ -194,7 +194,7 @@ if (Test-Want 'windows') {
     if ($code -ne 0) { throw 'Windows 构建失败' }
 
     $zipWin = "dist\Rust_DDNS-v$ver-x86_64-pc-windows-msvc.zip"
-    Compress-Archive -Path 'target\release\Rust_DDNS.exe', 'config.example.json' -DestinationPath $zipWin -Force
+    Compress-Archive -Path 'target\release\Rust_DDNS.exe', 'config.example.json', 'deploy\install.ps1', 'deploy\README-部署.md' -DestinationPath $zipWin -Force
     Write-Host "zip OK：$zipWin"
 }
 
@@ -286,5 +286,5 @@ Write-Host ''
 Write-Host '== 打包完成，产物（dist） =='
 Get-ChildItem 'dist' | Sort-Object Name | Format-Table Name, @{ n = 'KB'; e = { [math]::Round($_.Length / 1KB, 0) } } -AutoSize | Out-String | Write-Host
 Write-Host '提示：打包默认自动递升补丁号（-NoBump 可关；次版本用 -BumpMinor）。'
-Write-Host '提示：Linux 包解压后 sudo sh install.sh（一键安装进星尘/手动运行）；Windows 包解压直接运行 exe。'
+Write-Host '提示：Linux 包解压后 sudo sh install.sh；Windows 包解压后 powershell -ExecutionPolicy Bypass -File install.ps1（均可一键安装进星尘；也可直接运行）。'
 Write-Host '提示：-Clean 清理 zig 缓存与旧产物；-CleanAll 额外清空 target（全量重建、最省空间）。'
