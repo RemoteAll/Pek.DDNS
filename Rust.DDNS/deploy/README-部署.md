@@ -62,8 +62,22 @@ WantedBy=multi-user.target
 sudo sh install.sh --unregister   # 停止并移除星尘条目；保留文件与配置
 ```
 
-## 六、发布包建议（与 DHDeploy 发布包同构）
+## 六、一键打包（仓库已内置）
 
-打 Linux 包时把 `Rust_DDNS`（已带执行位）、`install.sh`、`config.example.json`（及本说明）放同一目录，压为 `tar.gz` 分发；目标机解压后 `sudo sh install.sh` 一步完成部署与托管注册。
+```powershell
+# Windows 主机执行：产出 dist\（Linux 包内已含本 install.sh + 配置模板 + 本说明）
+powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1
+```
+
+产物（`dist\`，附 `SHA256SUMS.txt`）：
+
+| 产物 | 内容 |
+|---|---|
+| `Rust_DDNS-v{v}-x86_64-unknown-linux-musl.tar.gz` | `Rust_DDNS`（0755）+ `install.sh` + `config.example.json` + 本说明 |
+| `Rust_DDNS-v{v}-x86_64-pc-windows-msvc.zip` | `Rust_DDNS.exe` + `config.example.json` |
+
+目标机解压后 `sudo sh install.sh` 一步完成部署与托管注册；Linux 交叉构建前置（cargo-zigbuild、rustup musl 目标、zig）由脚本自动补齐。
+
+> 安全规则：同一版本号重复打包且内容有变化会被版本守卫拒绝（需 `-Bump` 递升版本号或 `-Force` 放行；守卫脚本取自 DH.RustBase `tools/version-guard.ps1`，未找到时仅告警）。
 
 > 注意：`install.sh` 必须以 **LF 行尾**随包发布（本仓库已配 `.gitattributes` 固定 `*.sh` 为 LF，避免 Windows 检出为 CRLF 导致 Linux 上无法执行）。

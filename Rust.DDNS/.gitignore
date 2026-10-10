@@ -2,6 +2,10 @@
 target/
 Cargo.lock
 
+# 打包产物与本地工具链（scripts/build-release.ps1）
+dist/
+tools/
+
 # 运行时配置文件（部署时单独管理，不提交仓库）
 config.json
 

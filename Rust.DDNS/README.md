@@ -64,6 +64,8 @@ cargo build --release
 
 编译后的可执行文件位于 `target/release/Rust_DDNS.exe`（Windows）或 `target/release/Rust_DDNS`（Linux/macOS）。
 
+一键发布打包（Windows + Linux musl，产物 `dist\` 内含安装脚本）：`powershell -ExecutionPolicy Bypass -File scripts\build-release.ps1`。
+
 ### 配置 DNSPod Token
 
 首次运行会自动生成配置文件模板 `config.json`：
