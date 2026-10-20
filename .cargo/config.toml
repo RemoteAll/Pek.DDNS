@@ -1,0 +1,15 @@
+# 本机 crates.io 直连不稳定/偏慢，使用国内镜像（rsproxy）——与 DH.RustBase / Pek.RCode / Pek.RAgent / HLZX.EIP / Pek.RPanlServer 一致。
+# 本仓库为多工程目录（Rust.DDNS / Rust.FixHosts / Zig.DDNS / Hlk.FixHosts），Cargo 会从子工程目录向上查找，
+# 因此放在仓库根即可覆盖所有 Rust 子工程。
+# 说明：`replace-with` 对 registry 源是透明替换，Cargo.lock 里记录的仍是 crates.io 源地址，不产生锁文件抖动。
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[registries.rsproxy]
+index = "sparse+https://rsproxy.cn/index/"
+
+[net]
+git-fetch-with-cli = true
